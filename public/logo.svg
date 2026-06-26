@@ -1,0 +1,12 @@
+<!-- brand mark sourced from lucide "notebook-pen" (ISC, designer-maintained) -->
+<!-- replace this file with a final designer logo and rerun pwa-assets-generate -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <g transform="translate(102 102) scale(12.83)" stroke="#4f6bed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4" />
+    <path d="M2 6h4" />
+    <path d="M2 10h4" />
+    <path d="M2 14h4" />
+    <path d="M2 18h4" />
+    <path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z" />
+  </g>
+</svg>
