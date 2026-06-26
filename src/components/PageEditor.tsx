@@ -73,6 +73,7 @@ export function PageEditor({ content, onSave }: Props) {
       content={content}
       extensions={extensions}
       onChangeContent={handleChange}
+      contentClass="rte-content"
       dark={false}
     />
   )

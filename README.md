@@ -13,6 +13,11 @@ An offline first PWA notebook. A OneNote style infinite canvas where you own the
 ## Features
 
 - Infinite canvas with pan and zoom
+- Nested pages and page groups, mirrored as subdirectories on disk
+- Drag a page onto another in the sidebar to nest it, drop between to reorder, or right click for add/nest/promote/group
+- Custom page order persisted per folder, not just alphabetical
+- Resizable and collapsible sidebar, editor toolbar is the top bar so the canvas fills the screen
+- Opening a notebook lands on its first page
 - TipTap rich text blocks
 - Freehand ink drawing (perfect-freehand) via the Pointer Events API
 - Open `.nbook` files (a zip bundle) straight from your own folder

@@ -96,3 +96,30 @@
     cursor: not-allowed;
   }
 }
+
+/*let the rich text editor fill its pane, toolbar on top, canvas takes the rest*/
+.editor-fill,
+.editor-fill .reactjs-tiptap-editor,
+.editor-fill .reactjs-tiptap-editor > div,
+.editor-fill .richtext-max-h-full {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  max-height: none !important;
+}
+
+/*drop the boxed look so the canvas reads as full bleed*/
+.editor-fill .reactjs-tiptap-editor > div {
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
+}
+
+/*the editor content sits below the toolbar and scrolls on its own*/
+.editor-fill .rte-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}

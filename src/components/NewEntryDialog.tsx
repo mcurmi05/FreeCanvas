@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { Plus } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { validateName } from '@/lib/fs'
+import type { PageKind } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -15,22 +15,60 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 
-//create a page in the open notebook, name only
-export function NewPageDialog() {
-  const createNotebookPage = useAppStore((s) => s.createNotebookPage)
-  const loading = useAppStore((s) => s.loading)
+interface NewEntryDialogProps {
+  kind: PageKind
+  //omit for a top level entry, set to nest under a page or group
+  parentPath?: string
+  //the control that opens the dialog, omit when driving open externally
+  trigger?: React.ReactNode
+  //controlled open, pair with onOpenChange to drive from a menu
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+}
 
-  const [open, setOpen] = useState(false)
+const COPY = {
+  page: {
+    title: 'New page',
+    description: 'Adds a page.',
+    placeholder: 'Untitled Page',
+    fallback: 'Untitled Page',
+    submit: 'Create page',
+  },
+  group: {
+    title: 'New group',
+    description: 'Adds a group to hold pages.',
+    placeholder: 'Untitled Group',
+    fallback: 'Untitled Group',
+    submit: 'Create group',
+  },
+} as const
+
+//create a page or group, optionally nested under parentPath
+export function NewEntryDialog({
+  kind,
+  parentPath,
+  trigger,
+  open: openProp,
+  onOpenChange: onOpenChangeProp,
+}: NewEntryDialogProps) {
+  const createNotebookPage = useAppStore((s) => s.createNotebookPage)
+  const createNotebookGroup = useAppStore((s) => s.createNotebookGroup)
+  const loading = useAppStore((s) => s.loading)
+  const copy = COPY[kind]
+
+  const [openState, setOpenState] = useState(false)
+  const open = openProp ?? openState
   const [name, setName] = useState('')
   const [touched, setTouched] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const effectiveName = name.trim() || 'Untitled Page'
+  const effectiveName = name.trim() || copy.fallback
   const nameError = touched ? validateName(effectiveName) : null
   const canCreate = !validateName(effectiveName) && !loading
 
   function onOpenChange(next: boolean) {
-    setOpen(next)
+    setOpenState(next)
+    onOpenChangeProp?.(next)
     if (!next) {
       setName('')
       setTouched(false)
@@ -43,44 +81,40 @@ export function NewPageDialog() {
     setTouched(true)
     setError(null)
     if (validateName(effectiveName)) return
-    const ok = await createNotebookPage(effectiveName)
+    const create = kind === 'page' ? createNotebookPage : createNotebookGroup
+    const ok = await create(effectiveName, parentPath)
     if (ok) onOpenChange(false)
     else setError(useAppStore.getState().error)
   }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogTrigger asChild>
-        <Button size="sm" className="w-full">
-          <Plus aria-hidden />
-          New page
-        </Button>
-      </DialogTrigger>
+      {trigger && <DialogTrigger asChild>{trigger}</DialogTrigger>}
 
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>New page</DialogTitle>
-          <DialogDescription>Adds a page to this notebook.</DialogDescription>
+          <DialogTitle>{copy.title}</DialogTitle>
+          <DialogDescription>{copy.description}</DialogDescription>
         </DialogHeader>
 
         <form onSubmit={submit} className="flex flex-col gap-5">
           <div className="flex flex-col gap-2">
-            <Label htmlFor="page-name">Name</Label>
+            <Label htmlFor="entry-name">Name</Label>
             <Input
-              id="page-name"
-              name="page-name"
+              id="entry-name"
+              name="entry-name"
               autoComplete="off"
               spellCheck={false}
-              placeholder="Untitled Page"
+              placeholder={copy.placeholder}
               value={name}
               autoFocus
               onChange={(e) => setName(e.target.value)}
               onBlur={() => setTouched(true)}
               aria-invalid={!!nameError}
-              aria-describedby={nameError ? 'page-name-error' : undefined}
+              aria-describedby={nameError ? 'entry-name-error' : undefined}
             />
             {nameError && (
-              <p id="page-name-error" className="text-sm text-destructive">
+              <p id="entry-name-error" className="text-sm text-destructive">
                 {nameError}
               </p>
             )}
@@ -90,7 +124,7 @@ export function NewPageDialog() {
 
           <DialogFooter>
             <Button type="submit" disabled={!canCreate}>
-              Create page
+              {copy.submit}
             </Button>
           </DialogFooter>
         </form>
