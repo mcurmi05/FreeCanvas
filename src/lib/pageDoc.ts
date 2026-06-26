@@ -24,12 +24,25 @@ export interface ParsedPage {
   created: string | null
   //whether the title header is hidden for this page
   titleHidden: boolean
+  //width of the document text column in px, set by the width marker
+  docWidth: number
 }
+
+//default document text column width, used for legacy pages and new pages, and
+//the right-click reset target. picked so the page (text + 80px h-padding) is
+//roughly A4 width: 210mm at 96dpi ≈ 794px, minus the padding ≈ 714px
+export const DEFAULT_DOC_WIDTH = 714
 
 //split a saved page into its document, boxes, and metadata
 export function parsePage(content: string): ParsedPage {
   if (!content.includes('data-canvas-doc')) {
-    return { docHtml: content || '<p></p>', boxes: [], created: null, titleHidden: false }
+    return {
+      docHtml: content || '<p></p>',
+      boxes: [],
+      created: null,
+      titleHidden: false,
+      docWidth: DEFAULT_DOC_WIDTH,
+    }
   }
   const tpl = document.createElement('template')
   tpl.innerHTML = content
@@ -46,11 +59,13 @@ export function parsePage(content: string): ParsedPage {
       html: el.innerHTML,
     })
   })
+  const dw = parseFloat(docEl?.getAttribute('data-doc-w') ?? '')
   return {
     docHtml: docEl ? docEl.innerHTML : '<p></p>',
     boxes,
     created: docEl?.getAttribute('data-created') || null,
     titleHidden: docEl?.getAttribute('data-title-hidden') === '1',
+    docWidth: isNaN(dw) ? DEFAULT_DOC_WIDTH : dw,
   }
 }
 
@@ -60,9 +75,13 @@ export function serializePage(
   boxes: BoxMeta[],
   created: string | null,
   titleHidden = false,
+  docWidth = DEFAULT_DOC_WIDTH,
 ): string {
   const createdAttr = created ? ` data-created="${created}"` : ''
   const hiddenAttr = titleHidden ? ' data-title-hidden="1"' : ''
+  //only write the width when it differs from the default, keeps files clean
+  const widthAttr =
+    Math.round(docWidth) === DEFAULT_DOC_WIDTH ? '' : ` data-doc-w="${Math.round(docWidth)}"`
   const boxHtml = boxes
     .map((b) => {
       //only write a width once the box has been resized, else it stays auto
@@ -72,7 +91,7 @@ export function serializePage(
       )}px${w}">${b.html}</div>`
     })
     .join('')
-  return `<div data-canvas-doc${createdAttr}${hiddenAttr}>${docHtml}</div>${boxHtml}`
+  return `<div data-canvas-doc${createdAttr}${hiddenAttr}${widthAttr}>${docHtml}</div>${boxHtml}`
 }
 
 //the contents of a brand new page, stamped with its creation date

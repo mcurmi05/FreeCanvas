@@ -223,7 +223,7 @@ export function NotebookScreen() {
         {!collapsed && (
           <div
             onPointerDown={startResize}
-            className="absolute -right-1 top-0 z-10 h-full w-2 translate-x-1/2 cursor-col-resize hover:bg-border/60"
+            className="absolute -right-1 top-0 z-10 h-full w-4 translate-x-1/2 cursor-col-resize hover:bg-border/60"
             role="separator"
             aria-orientation="vertical"
             aria-label="resize sidebar"

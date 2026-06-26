@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { EyeOff, Plus } from 'lucide-react'
 import { PageEditor } from '@/components/PageEditor'
 import { validateName } from '@/lib/fs'
-import { parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
+import { DEFAULT_DOC_WIDTH, parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
 
 interface Props {
   pageKey: string
@@ -51,8 +51,11 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
   const wrapper = useRef<HTMLDivElement>(null)
   //the library's scrolling content node, where we portal the title and boxes
   const [contentEl, setContentEl] = useState<HTMLElement | null>(null)
-
   const initial = useRef(parsePage(content))
+  //width of the document text column, dragged via the marker at the top of the
+  //canvas and fed to the prosemirror max-width via the --doc-w css variable
+  const [docW, setDocW] = useState(initial.current.docWidth)
+  const docWRef = useRef(docW)
   const docHtml = useRef(initial.current.docHtml)
   const [boxes, setBoxes] = useState<BoxMeta[]>(initial.current.boxes)
   //the html of each box lives in a ref so typing never re-renders the box
@@ -72,7 +75,13 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
       ...b,
       html: boxHtml.current[b.id] ?? b.html,
     }))
-    return serializePage(docHtml.current, current, created.current, titleHiddenRef.current)
+    return serializePage(
+      docHtml.current,
+      current,
+      created.current,
+      titleHiddenRef.current,
+      docWRef.current,
+    )
   }
 
   const scheduleSave = useCallback(() => {
@@ -101,6 +110,9 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
   useEffect(() => {
     titleHiddenRef.current = titleHidden
   }, [titleHidden])
+  useEffect(() => {
+    docWRef.current = docW
+  }, [docW])
 
   //persist a freshly stamped creation date on legacy pages that lacked one
   useEffect(() => {
@@ -118,6 +130,7 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
     created.current = parsed.created ?? created.current
     setBoxes(parsed.boxes)
     setTitleHidden(parsed.titleHidden)
+    setDocW(parsed.docWidth)
     lastSaved.current = content
   }, [content])
 
@@ -144,11 +157,19 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
         t.closest('.ProseMirror') ||
         t.closest('.canvas-box') ||
         t.closest('.page-title') ||
-        t.closest('.page-title-add')
+        t.closest('.page-title-add') ||
+        t.closest('.doc-width-bar')
+      )
+        return
+      const rect = contentEl!.getBoundingClientRect()
+      //ignore clicks on the native scrollbars (past the content area), else
+      //grabbing the bottom/right scrollbar would drop a box and jump-scroll
+      if (
+        e.clientX - rect.left > contentEl!.clientWidth ||
+        e.clientY - rect.top > contentEl!.clientHeight
       )
         return
       e.preventDefault()
-      const rect = contentEl!.getBoundingClientRect()
       const x = e.clientX - rect.left + contentEl!.scrollLeft - BOX_PAD_X
       const y = e.clientY - rect.top + contentEl!.scrollTop - BOX_PAD_Y
       //no width yet, the box auto-sizes to its text until dragged
@@ -178,6 +199,71 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
   function onBoxInput(id: string, html: string) {
     boxHtml.current[id] = html
     scheduleSave()
+  }
+
+  //right-click the marker to reset the document to the default (A4) width
+  function resetWidth(e: React.MouseEvent) {
+    e.preventDefault()
+    docWRef.current = DEFAULT_DOC_WIDTH
+    setDocW(DEFAULT_DOC_WIDTH)
+    scheduleSave()
+  }
+
+  //drag the marker at the top of the canvas to resize the document text column.
+  //the text edge tracks the pointer in content coords, and when the pointer
+  //reaches the right edge we auto-scroll and keep growing so it can go past the
+  //viewport without limit
+  function startWidthDrag(e: React.PointerEvent) {
+    e.preventDefault()
+    const el = e.currentTarget as HTMLElement
+    el.setPointerCapture(e.pointerId)
+    //near this distance from the right edge, start auto-scrolling and growing
+    const EDGE = 48
+    const STEP = 14
+    let lastX = e.clientX
+    let raf = 0
+
+    function applyWidth(w: number) {
+      const next = Math.round(Math.max(80, w))
+      docWRef.current = next
+      setDocW(next)
+      scheduleSave()
+    }
+
+    //while the pointer sits in the edge zone, grow + scroll once per frame
+    function tick() {
+      raf = 0
+      if (!contentEl) return
+      const rect = contentEl.getBoundingClientRect()
+      if (lastX > rect.right - EDGE) {
+        contentEl.scrollLeft += STEP
+        applyWidth(docWRef.current + STEP)
+        raf = requestAnimationFrame(tick)
+      }
+    }
+
+    function move(ev: PointerEvent) {
+      lastX = ev.clientX
+      if (!contentEl) return
+      const rect = contentEl.getBoundingClientRect()
+      if (ev.clientX > rect.right - EDGE) {
+        if (!raf) raf = requestAnimationFrame(tick)
+      } else {
+        if (raf) cancelAnimationFrame(raf)
+        raf = 0
+        //text edge = pointer position in content coords, minus the 40px left pad
+        const contentX = ev.clientX - rect.left + contentEl.scrollLeft
+        applyWidth(contentX - 40)
+      }
+    }
+    function up(ev: PointerEvent) {
+      if (raf) cancelAnimationFrame(raf)
+      el.releasePointerCapture(ev.pointerId)
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', up)
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
   }
 
   //the document editor reports its html, fold it into the page and save
@@ -236,12 +322,31 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
   )
 
   return (
-    <div ref={wrapper} className="editor-fill relative min-h-0 flex-1">
+    <div
+      ref={wrapper}
+      className="editor-fill relative min-h-0 flex-1"
+      style={{ '--doc-w': `${docW}px` } as CSSProperties}
+    >
       <PageEditor key={pageKey} content={docHtml.current} onSave={onDocChange} />
 
       {contentEl &&
         createPortal(
           <>
+            {/*marker pinned to the top of the canvas, points down at the right
+               edge of the text. drag it left/right to set the document width*/}
+            <div className="doc-width-bar">
+              <div
+                className="doc-width-marker"
+                onPointerDown={startWidthDrag}
+                onContextMenu={resetWidth}
+                title="drag to set the document width, right-click to reset"
+                role="slider"
+                aria-label="document width"
+                aria-valuenow={docW}
+                aria-valuemin={80}
+              />
+            </div>
+
             {titleHidden ? (
               <button
                 className="page-title-add"
