@@ -131,7 +131,7 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  background: var(--background);
+  background: #fff;
 }
 
 /*onenote style title header above the document, linked to the page name*/
@@ -282,25 +282,30 @@
   pointer-events: auto;
 }
 
-.canvas-box-body {
+/*the frame is the drag handle. its padding gives a grabbable strip around the
+  text, cursor hints it moves the box*/
+.canvas-box-frame {
   width: 100%;
-  min-height: 24px;
   padding: 8px 10px;
-  border: 1px solid transparent;
   border-radius: 4px;
+  background: #fff;
+  cursor: move;
+  transition: box-shadow 0.12s ease;
+}
+
+/*the editable text sits inside the frame, click it to type, not to drag*/
+.canvas-box-text {
+  line-height: 1.5;
+  min-height: 1.5em;
   outline: none;
   cursor: text;
-  background: var(--background);
-  transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
-/*show a clear border on hover so it is obvious clicking types in this box*/
-.canvas-box:hover .canvas-box-body {
-  border-color: rgb(0 0 0 / 0.35);
+/*grey line on hover or while editing. a box-shadow ring, not a border: tailwind
+  preflight zeroes border-width on every element so a border colour never paints.
+  0 spread blur gives a crisp 1px line hugging the radius, no soft shadow*/
+.canvas-box:hover .canvas-box-frame,
+.canvas-box:focus-within .canvas-box-frame {
+  box-shadow: 0 0 0 2px #9ca3af;
 }
 
-/*solid blue border while editing the box*/
-.canvas-box-body:focus {
-  border-color: #0078d4;
-  box-shadow: 0 1px 8px -2px rgb(0 0 0 / 0.25);
-}

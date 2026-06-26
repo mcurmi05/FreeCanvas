@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { EyeOff, Plus, X } from 'lucide-react'
+import { EyeOff, Plus } from 'lucide-react'
 import { PageEditor } from '@/components/PageEditor'
 import { validateName } from '@/lib/fs'
 import { parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
@@ -281,7 +281,9 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
             )}
 
             <div
-              className="pointer-events-none absolute left-0 top-0"
+              //tiptap pins the prosemirror layer at z-index:0, lift the box
+              //overlay above it or the editor paints over boxes and eats hits
+              className="pointer-events-none absolute left-0 top-0 z-10"
               style={{ width: extent.w || undefined, height: extent.h || undefined }}
             >
               {boxes.map((b) => (
@@ -361,6 +363,9 @@ interface BoxProps {
 //a single draggable, editable text container
 function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove }: BoxProps) {
   const body = useRef<HTMLDivElement>(null)
+  //grey line on hover/focus is a box-shadow ring not a border: tailwind preflight
+  //resets border-width to 0 on every element so a border colour never paints,
+  //but box-shadow is untouched. driven by css :hover/:focus-within in global.css
 
   //seed the editable html once, never rewrite it or the caret jumps
   useEffect(() => {
@@ -388,6 +393,8 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
     const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y }
     const el = e.currentTarget as HTMLElement
     el.setPointerCapture(e.pointerId)
+    //pin the 4-way move cursor for the whole drag, not just over the frame
+    document.body.style.cursor = 'move'
     function move(ev: PointerEvent) {
       onMove(
         Math.max(0, start.x + ev.clientX - start.px),
@@ -398,6 +405,7 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
       el.releasePointerCapture(ev.pointerId)
       el.removeEventListener('pointermove', move)
       el.removeEventListener('pointerup', up)
+      document.body.style.cursor = ''
     }
     el.addEventListener('pointermove', move)
     el.addEventListener('pointerup', up)
@@ -437,32 +445,27 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
       //stop canvas-create clicks from firing under the box
       onPointerDown={(e) => e.stopPropagation()}
     >
-      {/*drag handle and delete, shown on hover*/}
-      <div className="absolute -top-5 left-0 flex h-5 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-        <button
-          onPointerDown={startDrag}
-          className="flex h-4 cursor-grab items-center rounded bg-accent px-2 text-[10px] text-muted-foreground active:cursor-grabbing"
-          aria-label="move box"
-        >
-          ⠿
-        </button>
-        <button
-          onClick={onRemove}
-          className="grid size-4 place-items-center rounded bg-accent text-muted-foreground hover:text-destructive"
-          aria-label="delete box"
-        >
-          <X className="size-3" />
-        </button>
+      {/*the frame is the drag handle, grab it to move. the inner text stops
+         propagation so clicking it edits instead. grey ring on hover/focus
+         lives in global.css*/}
+      <div className="canvas-box-frame" onPointerDown={startDrag}>
+        <div
+          ref={body}
+          className="canvas-box-text text-sm"
+          contentEditable
+          suppressContentEditableWarning
+          onPointerDown={(e) => e.stopPropagation()}
+          //escape deselects, blur drops focus and clears the selection
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              ;(e.currentTarget as HTMLElement).blur()
+            }
+          }}
+          onInput={(e) => onInput((e.target as HTMLElement).innerHTML)}
+          onBlur={onBlur}
+        />
       </div>
-
-      <div
-        ref={body}
-        className="canvas-box-body text-sm"
-        contentEditable
-        suppressContentEditableWarning
-        onInput={(e) => onInput((e.target as HTMLElement).innerHTML)}
-        onBlur={onBlur}
-      />
 
       {/*right edge resize grip*/}
       <div
