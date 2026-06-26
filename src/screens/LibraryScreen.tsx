@@ -1,10 +1,26 @@
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronLeft, Notebook } from 'lucide-react'
+import { ChevronLeft, Notebook, Pencil, Trash2 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { NewNotebookDialog } from '@/components/NewNotebookDialog'
+import { RenameDialog } from '@/components/RenameDialog'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { paths } from '@/routes/paths'
 import type { NotebookEntry } from '@/types'
+
+interface MenuState {
+  x: number
+  y: number
+  nb: NotebookEntry
+}
 
 //lists the notebooks in the open library
 export function LibraryScreen() {
@@ -13,6 +29,12 @@ export function LibraryScreen() {
   const notebooks = useAppStore((s) => s.notebooks)
   const openNotebook = useAppStore((s) => s.openNotebook)
   const closeLibrary = useAppStore((s) => s.closeLibrary)
+  const renameNotebook = useAppStore((s) => s.renameNotebook)
+  const deleteNotebook = useAppStore((s) => s.deleteNotebook)
+
+  const [menu, setMenu] = useState<MenuState | null>(null)
+  const [rename, setRename] = useState<NotebookEntry | null>(null)
+  const [confirm, setConfirm] = useState<NotebookEntry | null>(null)
 
   //leave the library, clear state then return to launch
   function handleBack() {
@@ -60,6 +82,10 @@ export function LibraryScreen() {
             <li key={nb.name}>
               <button
                 onClick={() => handleOpen(nb)}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  setMenu({ x: e.clientX, y: e.clientY, nb })
+                }}
                 className="flex w-full flex-col gap-3 rounded-xl border border-border bg-card p-4 text-left shadow-sm outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <Notebook className="size-6 text-primary" aria-hidden />
@@ -69,6 +95,108 @@ export function LibraryScreen() {
           ))}
         </ul>
       )}
+
+      {menu && (
+        <NotebookMenu
+          menu={menu}
+          onClose={() => setMenu(null)}
+          onRename={(nb) => setRename(nb)}
+          onDelete={(nb) => setConfirm(nb)}
+        />
+      )}
+
+      {rename && (
+        <RenameDialog
+          kind="notebook"
+          currentName={rename.name}
+          onClose={() => setRename(null)}
+          onRename={(name) => renameNotebook(rename.name, name)}
+        />
+      )}
+
+      {confirm && (
+        <Dialog open onOpenChange={(open) => !open && setConfirm(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete notebook</DialogTitle>
+              <DialogDescription>
+                Permanently delete “{confirm.name}” and all its pages? This cannot be
+                undone.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setConfirm(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={async () => {
+                  await deleteNotebook(confirm.name)
+                  setConfirm(null)
+                }}
+              >
+                Delete
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+    </div>
+  )
+}
+
+//floating right click menu for a notebook
+function NotebookMenu({
+  menu,
+  onClose,
+  onRename,
+  onDelete,
+}: {
+  menu: MenuState
+  onClose: () => void
+  onRename: (nb: NotebookEntry) => void
+  onDelete: (nb: NotebookEntry) => void
+}) {
+  useEffect(() => {
+    const close = () => onClose()
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  return (
+    <div
+      role="menu"
+      className="fixed z-50 min-w-44 overflow-hidden rounded-md border border-border bg-popover py-1 text-sm shadow-md"
+      style={{ left: menu.x, top: menu.y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <button
+        role="menuitem"
+        onClick={() => {
+          onRename(menu.nb)
+          onClose()
+        }}
+        className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left outline-none hover:bg-accent"
+      >
+        <Pencil className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Rename notebook
+      </button>
+      <button
+        role="menuitem"
+        onClick={() => {
+          onDelete(menu.nb)
+          onClose()
+        }}
+        className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-destructive outline-none hover:bg-destructive/10"
+      >
+        <Trash2 className="size-4 shrink-0" aria-hidden />
+        Delete notebook
+      </button>
     </div>
   )
 }

@@ -11,6 +11,7 @@ import {
   firstPage,
   listNotebooks,
   listPageTree,
+  PAGE_EXT,
   pickLibraryDirectory,
   promotePageToDir,
   readPage,
@@ -50,6 +51,10 @@ interface AppState {
 
   //create a notebook subfolder inside the open library
   createNotebook: (name: string) => Promise<boolean>
+  //rename a notebook folder inside the open library
+  renameNotebook: (oldName: string, newName: string) => Promise<boolean>
+  //delete a notebook folder and everything inside it
+  deleteNotebook: (name: string) => Promise<boolean>
   //enter a notebook and load its pages
   openNotebook: (notebook: NotebookEntry) => Promise<void>
   //leave the open notebook, back to the library
@@ -70,6 +75,10 @@ interface AppState {
   makeSubpage: (path: string) => Promise<boolean>
   //move a node out to its grandparent level
   promotePage: (path: string) => Promise<boolean>
+  //delete a page or group and everything inside it
+  deleteNode: (path: string) => Promise<boolean>
+  //rename a page or group, keeping it in place
+  renameNode: (path: string, newName: string) => Promise<boolean>
   //open a page and load its html
   openPage: (page: PageNode) => Promise<void>
   //persist the current page html
@@ -220,6 +229,56 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  renameNotebook: async (oldName, newName) => {
+    const library = get().library
+    if (!library) return false
+    const name = newName.trim()
+    if (name === oldName) return true
+    set({ loading: true, error: null })
+    try {
+      if (await directoryExists(library.handle, name)) {
+        set({ loading: false, error: 'a notebook with that name already exists' })
+        return false
+      }
+      //no native rename, copy the folder to the new name then drop the old one
+      const src = await library.handle.getDirectoryHandle(oldName)
+      await copyEntry(src, library.handle, name)
+      await library.handle.removeEntry(oldName, { recursive: true })
+      const notebooks = await listNotebooks(library.handle)
+      //keep the open notebook pointing at the renamed folder
+      const active = get().activeNotebook
+      const renamed = active?.name === oldName ? notebooks.find((n) => n.name === name) : active
+      set({ notebooks, activeNotebook: renamed ?? active, loading: false })
+      return true
+    } catch (err) {
+      set({ loading: false, error: (err as Error).message })
+      return false
+    }
+  },
+
+  deleteNotebook: async (name) => {
+    const library = get().library
+    if (!library) return false
+    set({ loading: true, error: null })
+    try {
+      await library.handle.removeEntry(name, { recursive: true })
+      const notebooks = await listNotebooks(library.handle)
+      //if the deleted notebook was open, leave it
+      const closing = get().activeNotebook?.name === name
+      set({
+        notebooks,
+        loading: false,
+        ...(closing
+          ? { activeNotebook: null, pageTree: [], activePage: null, pageContent: '' }
+          : {}),
+      })
+      return true
+    } catch (err) {
+      set({ loading: false, error: (err as Error).message })
+      return false
+    }
+  },
+
   openNotebook: async (notebook) => {
     //set active first so route guards pass immediately
     set({ activeNotebook: notebook, pageTree: [], activePage: null, pageContent: '' })
@@ -347,14 +406,106 @@ export const useAppStore = create<AppState>((set, get) => ({
     return get().moveNode(path, parentOf(pp) || null, 'inside')
   },
 
+  deleteNode: async (path) => {
+    const notebook = get().activeNotebook
+    if (!notebook) return false
+    const tree = get().pageTree
+    const node = findNode(tree, path)
+    if (!node) return false
+
+    set({ loading: true, error: null })
+    try {
+      const parentPath = parentOf(path)
+      const dir = await resolveDir(notebook.handle, parentPath)
+      const dn = diskName(node)
+      await dir.removeEntry(dn, { recursive: true })
+      //drop it from the parent's saved order
+      const remaining = childrenOf(tree, parentPath)
+        .map(diskName)
+        .filter((n) => n !== dn)
+      await writeOrder(dir, remaining)
+
+      const pageTree = await listPageTree(notebook.handle)
+      const active = get().activePage
+      //if the open page lived under what we deleted, fall back to the first page
+      const activeGone =
+        !!active && (active.path === path || active.path.startsWith(path + '/'))
+      if (activeGone) {
+        set({ pageTree, loading: false })
+        const first = firstPage(pageTree)
+        if (first) await get().openPage(first)
+        else set({ activePage: null, pageContent: '' })
+      } else {
+        const refreshed = active ? findNode(pageTree, active.path) : null
+        set({ pageTree, activePage: refreshed ?? active, loading: false })
+      }
+      return true
+    } catch (err) {
+      set({ loading: false, error: (err as Error).message })
+      return false
+    }
+  },
+
+  renameNode: async (path, newName) => {
+    const notebook = get().activeNotebook
+    if (!notebook) return false
+    const tree = get().pageTree
+    const node = findNode(tree, path)
+    if (!node) return false
+    const name = newName.trim()
+    if (name === node.name) return true
+
+    set({ loading: true, error: null })
+    try {
+      const parentPath = parentOf(path)
+      const dir = await resolveDir(notebook.handle, parentPath)
+      if (await entryExists(dir, name)) {
+        set({ loading: false, error: 'an entry with that name already exists' })
+        return false
+      }
+
+      //no native rename, copy to the new disk name then remove the old one
+      const oldDisk = diskName(node)
+      const newDisk = node.dirHandle ? name : name + PAGE_EXT
+      const srcHandle = node.dirHandle ?? node.fileHandle
+      if (!srcHandle) {
+        set({ loading: false })
+        return false
+      }
+      await copyEntry(srcHandle, dir, newDisk)
+      await dir.removeEntry(oldDisk, { recursive: true })
+      //swap the name in the parent's saved order, keeping its position
+      const order = childrenOf(tree, parentPath).map((n) =>
+        n.path === path ? newDisk : diskName(n),
+      )
+      await writeOrder(dir, order)
+
+      const pageTree = await listPageTree(notebook.handle)
+      const newPath = parentPath ? `${parentPath}/${name}` : name
+      const active = get().activePage
+      const refreshed = active
+        ? findNode(pageTree, remapPath(active.path, path, newPath))
+        : null
+      set({ pageTree, activePage: refreshed ?? active, loading: false })
+      return true
+    } catch (err) {
+      set({ loading: false, error: (err as Error).message })
+      return false
+    }
+  },
+
   openPage: async (page) => {
-    set({ activePage: page, pageContent: '', saveState: 'idle' })
-    if (!page.fileHandle) return
+    //read the file before activating so the editor mounts with real content,
+    //the library only takes the content prop once at mount, not on updates
+    if (!page.fileHandle) {
+      set({ activePage: page, pageContent: '', saveState: 'idle' })
+      return
+    }
     try {
       const html = await readPage(page.fileHandle)
-      set({ pageContent: html })
+      set({ activePage: page, pageContent: html, saveState: 'idle' })
     } catch (err) {
-      set({ error: (err as Error).message })
+      set({ activePage: page, pageContent: '', error: (err as Error).message })
     }
   },
 

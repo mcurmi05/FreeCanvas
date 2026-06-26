@@ -36,7 +36,10 @@ export function PageEditor({ content, onSave }: Props) {
   const extensions = useMemo(
     () => [
       BaseKit.configure({
-        placeholder: { showOnlyCurrent: true, placeholder: 'write something…' },
+        //no placeholder text, a blank document like word
+        placeholder: false,
+        //drop the character and word count footer bar
+        characterCount: false,
       }),
       History,
       Clear,

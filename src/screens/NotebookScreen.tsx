@@ -11,12 +11,23 @@ import {
   Outdent,
   PanelLeft,
   PanelLeftClose,
+  Pencil,
+  Trash2,
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import type { DropPosition } from '@/store/appStore'
-import { PageEditor } from '@/components/PageEditor'
+import { PageCanvas } from '@/components/PageCanvas'
 import { NewEntryDialog } from '@/components/NewEntryDialog'
+import { RenameDialog } from '@/components/RenameDialog'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { paths } from '@/routes/paths'
 import { cn } from '@/lib/utils'
 import type { PageKind, PageNode } from '@/types'
@@ -60,6 +71,9 @@ export function NotebookScreen() {
   const [dialog, setDialog] = useState<{ kind: PageKind; parentPath?: string } | null>(
     null,
   )
+  const [confirm, setConfirm] = useState<PageNode | null>(null)
+  const [rename, setRename] = useState<PageNode | null>(null)
+  const renameNode = useAppStore((s) => s.renameNode)
   const [draggingPath, setDraggingPath] = useState<string | null>(null)
 
   //sidebar width and collapsed state survive reloads
@@ -121,12 +135,12 @@ export function NotebookScreen() {
     <div className="flex h-dvh">
       {!collapsed && (
         <aside
-          className="flex shrink-0 flex-col border-r border-border"
+          className="relative flex shrink-0 flex-col border-r border-border"
           style={{ width }}
           onContextMenu={(e) => openMenu(e, null)}
         >
-          {/*sidebar header, nav lives here so the editor can own the top bar*/}
-          <div className="flex items-center gap-2 border-b border-border px-2 py-2">
+          {/*sidebar header, height matches the editor toolbar so the bars align*/}
+          <div className="flex h-12 items-center gap-2 border-b border-border px-2">
             <Button
               variant="ghost"
               size="icon"
@@ -187,7 +201,7 @@ export function NotebookScreen() {
               onDrop={onRootDrop}
             >
               {pageTree.length === 0 ? (
-                <p className="px-1 py-2 text-xs text-muted-foreground">no pages yet</p>
+                <p className="px-1 py-2 text-xs text-muted-foreground">No pages yet.</p>
               ) : (
                 <ul className="flex flex-col gap-0.5">
                   {pageTree.map((node) => (
@@ -197,18 +211,17 @@ export function NotebookScreen() {
               )}
             </div>
           </TreeCtx.Provider>
-        </aside>
-      )}
 
-      {/*resize divider*/}
-      {!collapsed && (
-        <div
-          onPointerDown={startResize}
-          className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-border"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="resize sidebar"
-        />
+          {/*resize handle on the sidebar edge, sits over the border so the top
+             bar line runs unbroken from the sidebar into the editor*/}
+          <div
+            onPointerDown={startResize}
+            className="absolute -right-1 top-0 z-10 h-full w-2 translate-x-1/2 cursor-col-resize hover:bg-border/60"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="resize sidebar"
+          />
+        </aside>
       )}
 
       {/*editor area, fills the full height, its toolbar is the top bar*/}
@@ -238,9 +251,12 @@ export function NotebookScreen() {
         )}
 
         {activePage ? (
-          <div className="editor-fill min-h-0 flex-1">
-            <PageEditor key={activePage.path} content={pageContent} onSave={savePage} />
-          </div>
+          <PageCanvas
+            key={activePage.path}
+            pageKey={activePage.path}
+            content={pageContent}
+            onSave={savePage}
+          />
         ) : (
           <div className="grid flex-1 place-items-center p-10 text-center">
             <div className="flex flex-col items-center gap-2 text-muted-foreground">
@@ -260,6 +276,17 @@ export function NotebookScreen() {
           menu={menu}
           onClose={() => setMenu(null)}
           onNew={(kind, parentPath) => setDialog({ kind, parentPath })}
+          onRename={(node) => setRename(node)}
+          onDelete={(node) => setConfirm(node)}
+        />
+      )}
+
+      {rename && (
+        <RenameDialog
+          kind={rename.kind}
+          currentName={rename.name}
+          onClose={() => setRename(null)}
+          onRename={(name) => renameNode(rename.path, name)}
         />
       )}
 
@@ -271,7 +298,44 @@ export function NotebookScreen() {
           onOpenChange={(open) => !open && setDialog(null)}
         />
       )}
+
+      {confirm && (
+        <DeleteDialog node={confirm} onClose={() => setConfirm(null)} />
+      )}
     </div>
+  )
+}
+
+//confirm before deleting, groups warn that their pages go too
+function DeleteDialog({ node, onClose }: { node: PageNode; onClose: () => void }) {
+  const deleteNode = useAppStore((s) => s.deleteNode)
+  const nested = node.children.length > 0
+
+  async function onConfirm() {
+    await deleteNode(node.path)
+    onClose()
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Delete {node.kind}</DialogTitle>
+          <DialogDescription>
+            Permanently delete “{node.name}”
+            {nested ? ' and everything inside it' : ''}? This cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm}>
+            Delete
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -280,10 +344,14 @@ function SidebarMenu({
   menu,
   onClose,
   onNew,
+  onRename,
+  onDelete,
 }: {
   menu: MenuState
   onClose: () => void
   onNew: (kind: PageKind, parentPath?: string) => void
+  onRename: (node: PageNode) => void
+  onDelete: (node: PageNode) => void
 }) {
   const makeSubpage = useAppStore((s) => s.makeSubpage)
   const promotePage = useAppStore((s) => s.promotePage)
@@ -331,6 +399,17 @@ function SidebarMenu({
           <MenuItem icon={Outdent} onClick={() => run(() => promotePage(node.path))}>
             Promote page
           </MenuItem>
+          <div className="my-1 h-px bg-border" />
+          <MenuItem icon={Pencil} onClick={() => run(() => onRename(node))}>
+            Rename {node.kind}
+          </MenuItem>
+          <MenuItem
+            icon={Trash2}
+            destructive
+            onClick={() => run(() => onDelete(node))}
+          >
+            Delete {node.kind}
+          </MenuItem>
         </>
       )}
     </div>
@@ -341,18 +420,26 @@ function MenuItem({
   icon: Icon,
   onClick,
   children,
+  destructive,
 }: {
   icon: typeof FilePlus
   onClick: () => void
   children: React.ReactNode
+  destructive?: boolean
 }) {
   return (
     <button
       role="menuitem"
       onClick={onClick}
-      className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left outline-none hover:bg-accent focus-visible:bg-accent"
+      className={cn(
+        'flex w-full items-center gap-2.5 px-3 py-1.5 text-left outline-none hover:bg-accent focus-visible:bg-accent',
+        destructive && 'text-destructive hover:bg-destructive/10',
+      )}
     >
-      <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+      <Icon
+        className={cn('size-4 shrink-0', destructive ? '' : 'text-muted-foreground')}
+        aria-hidden
+      />
       {children}
     </button>
   )

@@ -12,7 +12,7 @@ An offline first PWA notebook. A OneNote style infinite canvas where you own the
 
 ## Features
 
-- Infinite canvas with pan and zoom
+- OneNote style page, a normal document on a blank white canvas, click anywhere to drop a floating text box
 - Nested pages and page groups, mirrored as subdirectories on disk
 - Drag a page onto another in the sidebar to nest it, drop between to reorder, or right click for add/nest/promote/group
 - Custom page order persisted per folder, not just alphabetical
