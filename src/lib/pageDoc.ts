@@ -7,7 +7,9 @@ export interface BoxMeta {
   id: string
   x: number
   y: number
-  w: number
+  //undefined until the user drags to resize, then a fixed pixel width. while
+  //undefined the box auto-sizes to its text
+  w?: number
   html: string
 }
 
@@ -34,11 +36,13 @@ export function parsePage(content: string): ParsedPage {
   const docEl = tpl.content.querySelector('[data-canvas-doc]')
   const boxes: BoxMeta[] = []
   tpl.content.querySelectorAll<HTMLElement>('[data-canvas-box]').forEach((el) => {
+    const w = parseFloat(el.style.width)
     boxes.push({
       id: rid(),
       x: parseFloat(el.style.left) || 0,
       y: parseFloat(el.style.top) || 0,
-      w: parseFloat(el.style.width) || 400,
+      //no stored width means the box still auto-sizes to its text
+      w: isNaN(w) ? undefined : w,
       html: el.innerHTML,
     })
   })
@@ -60,12 +64,13 @@ export function serializePage(
   const createdAttr = created ? ` data-created="${created}"` : ''
   const hiddenAttr = titleHidden ? ' data-title-hidden="1"' : ''
   const boxHtml = boxes
-    .map(
-      (b) =>
-        `<div data-canvas-box style="left:${Math.round(b.x)}px;top:${Math.round(
-          b.y,
-        )}px;width:${Math.round(b.w)}px">${b.html}</div>`,
-    )
+    .map((b) => {
+      //only write a width once the box has been resized, else it stays auto
+      const w = b.w === undefined ? '' : `;width:${Math.round(b.w)}px`
+      return `<div data-canvas-box style="left:${Math.round(b.x)}px;top:${Math.round(
+        b.y,
+      )}px${w}">${b.html}</div>`
+    })
     .join('')
   return `<div data-canvas-doc${createdAttr}${hiddenAttr}>${docHtml}</div>${boxHtml}`
 }

@@ -15,8 +15,14 @@ interface Props {
   onRenamePage: (name: string) => Promise<boolean>
 }
 
-const BOX_DEFAULT_W = 400
+//new boxes auto-size to their text and grow until this width, then wrap. once
+//the user drags the edge the box stores a fixed width and ignores this
+const BOX_MAX_W = 520
 const SCROLL_PAD = 240
+//frame padding (.canvas-box-frame), subtracted on create so the caret lands
+//on the click point rather than offset by the padding
+const BOX_PAD_X = 10
+const BOX_PAD_Y = 8
 
 //the creation date and time, shown under the title the way onenote does
 function formatCreated(iso: string): { date: string; time: string } {
@@ -143,9 +149,10 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
         return
       e.preventDefault()
       const rect = contentEl!.getBoundingClientRect()
-      const x = e.clientX - rect.left + contentEl!.scrollLeft
-      const y = e.clientY - rect.top + contentEl!.scrollTop
-      const box: BoxMeta = { id: rid(), x, y, w: BOX_DEFAULT_W, html: '' }
+      const x = e.clientX - rect.left + contentEl!.scrollLeft - BOX_PAD_X
+      const y = e.clientY - rect.top + contentEl!.scrollTop - BOX_PAD_Y
+      //no width yet, the box auto-sizes to its text until dragged
+      const box: BoxMeta = { id: rid(), x: Math.max(0, x), y: Math.max(0, y), html: '' }
       boxHtml.current[box.id] = ''
       setBoxes((bs) => [...bs, box])
       setFocusId(box.id)
@@ -222,7 +229,7 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
   //grow the scroll area so boxes dragged outward extend the canvas
   const extent = boxes.reduce(
     (acc, b) => ({
-      w: Math.max(acc.w, b.x + b.w + SCROLL_PAD),
+      w: Math.max(acc.w, b.x + (b.w ?? BOX_MAX_W) + SCROLL_PAD),
       h: Math.max(acc.h, b.y + 80 + SCROLL_PAD),
     }),
     { w: 0, h: 0 },
@@ -387,8 +394,15 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  //drag the header to reposition, clamped to the positive canvas
+  //true once the box has typed text or an image, drives drag + cursor
+  function hasContent() {
+    return !!(body.current?.textContent?.trim() || body.current?.querySelector('img'))
+  }
+
+  //drag the header to reposition, clamped to the positive canvas. an empty box
+  //is not draggable yet, a click just keeps the caret for typing
   function startDrag(e: React.PointerEvent) {
+    if (!hasContent()) return
     e.preventDefault()
     const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y }
     const el = e.currentTarget as HTMLElement
@@ -415,8 +429,10 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
   function startResize(e: React.PointerEvent) {
     e.preventDefault()
     e.stopPropagation()
-    const start = { px: e.clientX, w: box.w }
     const el = e.currentTarget as HTMLElement
+    //first resize of an auto-sized box: start from its current rendered width
+    const startW = box.w ?? el.parentElement?.offsetWidth ?? 80
+    const start = { px: e.clientX, w: startW }
     el.setPointerCapture(e.pointerId)
     function move(ev: PointerEvent) {
       onResize(Math.max(80, start.w + ev.clientX - start.px))
@@ -432,16 +448,19 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
 
   //drop the box if it is left empty
   function onBlur() {
-    if (!body.current) return
-    if (!body.current.textContent?.trim() && !body.current.querySelector('img')) {
-      onRemove()
-    }
+    if (!hasContent()) onRemove()
   }
 
   return (
     <div
       className="canvas-box group"
-      style={{ left: box.x, top: box.y, width: box.w }}
+      //no stored width: grow with the text up to BOX_MAX_W then wrap. once
+      //resized, use the fixed width the user dragged to
+      style={
+        box.w
+          ? { left: box.x, top: box.y, width: box.w }
+          : { left: box.x, top: box.y, width: 'max-content', maxWidth: BOX_MAX_W }
+      }
       //stop canvas-create clicks from firing under the box
       onPointerDown={(e) => e.stopPropagation()}
     >

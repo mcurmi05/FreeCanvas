@@ -132,6 +132,9 @@
   min-height: 0;
   overflow: auto;
   background: #fff;
+  /*the blank canvas is free-text space, show the text caret like a doc. boxes
+    and the title override with their own move/text cursors*/
+  cursor: text;
 }
 
 /*onenote style title header above the document, linked to the page name*/
@@ -293,19 +296,31 @@
   transition: box-shadow 0.12s ease;
 }
 
-/*the editable text sits inside the frame, click it to type, not to drag*/
-.canvas-box-text {
-  line-height: 1.5;
-  min-height: 1.5em;
-  outline: none;
+/*an empty box is not draggable yet, show the text caret not the move cursor*/
+.canvas-box:has(.canvas-box-text:empty) .canvas-box-frame {
   cursor: text;
 }
 
-/*grey line on hover or while editing. a box-shadow ring, not a border: tailwind
-  preflight zeroes border-width on every element so a border colour never paints.
-  0 spread blur gives a crisp 1px line hugging the radius, no soft shadow*/
-.canvas-box:hover .canvas-box-frame,
-.canvas-box:focus-within .canvas-box-frame {
+/*the editable text sits inside the frame, click it to type, not to drag.
+  break long unbroken words so the box wraps at its max width instead of
+  overflowing*/
+.canvas-box-text {
+  line-height: 1.5;
+  min-height: 1.5em;
+  /*floor the width so a brand-new empty box has room to show the caret before
+    any text sizes it*/
+  min-width: 120px;
+  outline: none;
+  cursor: text;
+  overflow-wrap: anywhere;
+}
+
+/*grey line on hover or while editing, but only once the box has text: a fresh
+  empty box shows just the blinking caret, the ring appears on the first keypress.
+  box-shadow not border (tailwind preflight zeroes border-width); 0 blur/offset
+  gives a crisp line hugging the radius*/
+.canvas-box:has(.canvas-box-text:not(:empty)):hover .canvas-box-frame,
+.canvas-box:has(.canvas-box-text:not(:empty)):focus-within .canvas-box-frame {
   box-shadow: 0 0 0 2px #9ca3af;
 }
 
