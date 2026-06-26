@@ -133,12 +133,17 @@ export function NotebookScreen() {
 
   return (
     <div className="flex h-dvh">
-      {!collapsed && (
-        <aside
-          className="relative flex shrink-0 flex-col border-r border-border"
-          style={{ width }}
-          onContextMenu={(e) => openMenu(e, null)}
-        >
+      {/*sidebar, width animates between 0 and its set size when toggled*/}
+      <aside
+        className={cn(
+          'relative shrink-0 overflow-hidden transition-[width] duration-200 ease-out',
+          !collapsed && 'border-r border-border',
+        )}
+        style={{ width: collapsed ? 0 : width }}
+        onContextMenu={(e) => openMenu(e, null)}
+      >
+        {/*inner pane keeps its full width so content slides instead of squishing*/}
+        <div className="flex h-full flex-col" style={{ width }}>
           {/*sidebar header, height matches the editor toolbar so the bars align*/}
           <div className="flex h-12 items-center gap-2 border-b border-border px-2">
             <Button
@@ -211,9 +216,11 @@ export function NotebookScreen() {
               )}
             </div>
           </TreeCtx.Provider>
+        </div>
 
-          {/*resize handle on the sidebar edge, sits over the border so the top
-             bar line runs unbroken from the sidebar into the editor*/}
+        {/*resize handle on the sidebar edge, sits over the border so the top
+           bar line runs unbroken from the sidebar into the editor*/}
+        {!collapsed && (
           <div
             onPointerDown={startResize}
             className="absolute -right-1 top-0 z-10 h-full w-2 translate-x-1/2 cursor-col-resize hover:bg-border/60"
@@ -221,8 +228,8 @@ export function NotebookScreen() {
             aria-orientation="vertical"
             aria-label="resize sidebar"
           />
-        </aside>
-      )}
+        )}
+      </aside>
 
       {/*editor area, fills the full height, its toolbar is the top bar*/}
       <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -254,8 +261,10 @@ export function NotebookScreen() {
           <PageCanvas
             key={activePage.path}
             pageKey={activePage.path}
+            pageName={activePage.name}
             content={pageContent}
             onSave={savePage}
+            onRenamePage={(name) => renameNode(activePage.path, name)}
           />
         ) : (
           <div className="grid flex-1 place-items-center p-10 text-center">

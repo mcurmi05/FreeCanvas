@@ -124,11 +124,88 @@
 
 /*the editor content area is the canvas, blank white, scrolls, fills height*/
 /*the document sits at the top, the rest is raw canvas for text boxes*/
+/*flex column so the title header can sit above the document via order*/
 .editor-fill .rte-content {
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   background: var(--background);
+}
+
+/*onenote style title header above the document, linked to the page name*/
+/*plain text with a full width underline, then the date, no box or border*/
+.page-title {
+  order: -1;
+  flex: 0 0 auto;
+  /*shrink to the wider of the title or date so the right side stays raw canvas*/
+  align-self: flex-start;
+  padding: 18px 0 10px 40px;
+}
+
+/*an editable div, sizes to its text so the underline matches the title width*/
+/*identical focused or not, no input box, only the bottom underline*/
+.page-title-input {
+  display: inline-block;
+  max-width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 1.75rem;
+  line-height: 1.3;
+  font-weight: 400;
+  color: var(--foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 0;
+}
+
+/*thin line between the title and the date, runs to the wider of the two + 20px*/
+.page-title-rule {
+  width: calc(100% + 20px);
+  height: 1px;
+  margin: 7px 0;
+  background: rgb(0 0 0 / 0.25);
+}
+
+/*placeholder shown when the title is empty*/
+.page-title-input:empty::before {
+  content: attr(data-placeholder);
+  color: var(--muted-foreground);
+  opacity: 0.5;
+}
+
+.page-title-date {
+  display: flex;
+  align-items: baseline;
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: var(--muted-foreground);
+}
+
+/*offset the time just to the right of the date, like onenote*/
+.page-title-time {
+  margin-left: 1rem;
+}
+
+/*shown in place of the title when it is hidden, click to bring it back*/
+.page-title-add {
+  order: -1;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 8px 0 0 40px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+
+.page-title-add:hover {
+  background: var(--accent);
 }
 
 /*no block drag handle or insert (+) button, the document types like word*/
@@ -142,18 +219,20 @@
   max-width: 820px;
   margin: 0;
   min-height: 6rem;
-  /*small left padding so left aligned text sits close to the sidebar*/
-  padding: 28px 40px 80px 10px;
+  /*left pad matches the title so text lines up with it*/
+  padding: 11px 40px 80px 40px;
   outline: none;
   border: none;
   box-shadow: none;
   cursor: text;
 }
 
-/*the library pins padding with a tripled-class rule, beat it to hug the left*/
-.editor-fill .ProseMirror.ProseMirror.ProseMirror {
-  padding-left: 10px;
-  padding-right: 40px;
+/*the library pins padding with a tripled-class rule scoped under its own
+  doubled wrapper class, plus a min-width:1024px override, both specificity 5.
+  match that wrapper and add .editor-fill to clear it so the left pad always
+  wins and the document lines up with the title*/
+.editor-fill .reactjs-tiptap-editor.reactjs-tiptap-editor .ProseMirror.ProseMirror.ProseMirror {
+  padding: 11px 40px 80px 40px;
 }
 
 /*the library renders indent as text-indent, which only shifts the first line*/

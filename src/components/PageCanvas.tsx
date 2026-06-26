@@ -1,70 +1,49 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { X } from 'lucide-react'
+import { EyeOff, Plus, X } from 'lucide-react'
 import { PageEditor } from '@/components/PageEditor'
+import { validateName } from '@/lib/fs'
+import { parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
 
 interface Props {
   pageKey: string
+  //the page's name, shown and edited in the title header
+  pageName: string
   content: string
-  onSave: (html: string) => void
-}
-
-//a floating note container placed anywhere on the page
-interface BoxMeta {
-  id: string
-  x: number
-  y: number
-  w: number
-  html: string
+  onSave: (html: string) => void | Promise<void>
+  //rename the page when the title is edited, returns false on failure
+  onRenamePage: (name: string) => Promise<boolean>
 }
 
 const BOX_DEFAULT_W = 400
 const SCROLL_PAD = 240
 
-function rid(): string {
-  return Math.random().toString(36).slice(2)
-}
-
-//split a saved page into its main document html and its floating boxes
-//old pages have no wrapper, so the whole string is the document
-function parsePage(content: string): { docHtml: string; boxes: BoxMeta[] } {
-  if (!content.includes('data-canvas-doc')) {
-    return { docHtml: content || '<p></p>', boxes: [] }
+//the creation date and time, shown under the title the way onenote does
+function formatCreated(iso: string): { date: string; time: string } {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return { date: '', time: '' }
+  return {
+    date: d.toLocaleDateString(undefined, {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    }),
+    time: d
+      .toLocaleTimeString(undefined, {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      })
+      .toLowerCase(),
   }
-  const tpl = document.createElement('template')
-  tpl.innerHTML = content
-  const docEl = tpl.content.querySelector('[data-canvas-doc]')
-  const boxes: BoxMeta[] = []
-  tpl.content.querySelectorAll<HTMLElement>('[data-canvas-box]').forEach((el) => {
-    boxes.push({
-      id: rid(),
-      x: parseFloat(el.style.left) || 0,
-      y: parseFloat(el.style.top) || 0,
-      w: parseFloat(el.style.width) || BOX_DEFAULT_W,
-      html: el.innerHTML,
-    })
-  })
-  return { docHtml: docEl ? docEl.innerHTML : '<p></p>', boxes }
-}
-
-//stitch the document and boxes back into one html string for the page file
-function serializePage(docHtml: string, boxes: BoxMeta[]): string {
-  const boxHtml = boxes
-    .map(
-      (b) =>
-        `<div data-canvas-box style="left:${Math.round(b.x)}px;top:${Math.round(
-          b.y,
-        )}px;width:${Math.round(b.w)}px">${b.html}</div>`,
-    )
-    .join('')
-  return `<div data-canvas-doc>${docHtml}</div>${boxHtml}`
 }
 
 //onenote style page, a normal document plus floating text boxes you place
 //anywhere on the blank white canvas, mounted fresh per page via its key
-export function PageCanvas({ pageKey, content, onSave }: Props) {
+export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }: Props) {
   const wrapper = useRef<HTMLDivElement>(null)
-  //the library's scrolling content node, where we portal the boxes layer
+  //the library's scrolling content node, where we portal the title and boxes
   const [contentEl, setContentEl] = useState<HTMLElement | null>(null)
 
   const initial = useRef(parsePage(content))
@@ -74,28 +53,54 @@ export function PageCanvas({ pageKey, content, onSave }: Props) {
   const boxHtml = useRef<Record<string, string>>(
     Object.fromEntries(initial.current.boxes.map((b) => [b.id, b.html])),
   )
+  //creation date, stamp legacy pages that never had one
+  const created = useRef(initial.current.created ?? new Date().toISOString())
+  const [titleHidden, setTitleHidden] = useState(initial.current.titleHidden)
+  const titleHiddenRef = useRef(titleHidden)
   //ignore the store echo of our own save, only adopt external content
   const lastSaved = useRef(content)
   const saveTimer = useRef<number | undefined>(undefined)
 
+  function buildHtml(): string {
+    const current = boxesRef.current.map((b) => ({
+      ...b,
+      html: boxHtml.current[b.id] ?? b.html,
+    }))
+    return serializePage(docHtml.current, current, created.current, titleHiddenRef.current)
+  }
+
   const scheduleSave = useCallback(() => {
     window.clearTimeout(saveTimer.current)
     saveTimer.current = window.setTimeout(() => {
-      const current = boxesWithHtml()
-      const html = serializePage(docHtml.current, current)
+      const html = buildHtml()
       lastSaved.current = html
       onSave(html)
     }, 500)
-    function boxesWithHtml() {
-      return boxesRef.current.map((b) => ({ ...b, html: boxHtml.current[b.id] ?? b.html }))
-    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onSave])
+
+  //write any pending changes right now, used before a rename copies the file
+  async function flushSave() {
+    window.clearTimeout(saveTimer.current)
+    const html = buildHtml()
+    lastSaved.current = html
+    await onSave(html)
+  }
 
   //keep a ref mirror of boxes so the debounced save sees the latest
   const boxesRef = useRef(boxes)
   useEffect(() => {
     boxesRef.current = boxes
   }, [boxes])
+  useEffect(() => {
+    titleHiddenRef.current = titleHidden
+  }, [titleHidden])
+
+  //persist a freshly stamped creation date on legacy pages that lacked one
+  useEffect(() => {
+    if (initial.current.created === null) scheduleSave()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   //adopt content that came from outside (page switch, external load), but skip
   //the echo of our own writes so editing never clobbers itself
@@ -104,7 +109,9 @@ export function PageCanvas({ pageKey, content, onSave }: Props) {
     const parsed = parsePage(content)
     docHtml.current = parsed.docHtml
     boxHtml.current = Object.fromEntries(parsed.boxes.map((b) => [b.id, b.html]))
+    created.current = parsed.created ?? created.current
     setBoxes(parsed.boxes)
+    setTitleHidden(parsed.titleHidden)
     lastSaved.current = content
   }, [content])
 
@@ -127,7 +134,13 @@ export function PageCanvas({ pageKey, content, onSave }: Props) {
     function onDown(e: MouseEvent) {
       if (e.button !== 0) return
       const t = e.target as HTMLElement
-      if (t.closest('.ProseMirror') || t.closest('.canvas-box')) return
+      if (
+        t.closest('.ProseMirror') ||
+        t.closest('.canvas-box') ||
+        t.closest('.page-title') ||
+        t.closest('.page-title-add')
+      )
+        return
       e.preventDefault()
       const rect = contentEl!.getBoundingClientRect()
       const x = e.clientX - rect.left + contentEl!.scrollLeft
@@ -166,6 +179,46 @@ export function PageCanvas({ pageKey, content, onSave }: Props) {
     scheduleSave()
   }
 
+  //the page title is an editable div, seed it once so the caret never jumps
+  //a div avoids the input element's focused vs blurred look differences
+  const titleRef = useRef<HTMLDivElement>(null)
+  const [titleMenu, setTitleMenu] = useState<{ x: number; y: number } | null>(null)
+
+  //seed the title text whenever the element mounts (it is portaled in after
+  //the editor's content node is found) or the page changes, but never while
+  //the user is editing it
+  useEffect(() => {
+    const el = titleRef.current
+    if (el && document.activeElement !== el) el.textContent = pageName
+  }, [pageName, contentEl, titleHidden])
+
+  function resetTitle() {
+    if (titleRef.current) titleRef.current.textContent = pageName
+  }
+
+  async function commitTitle() {
+    const next = (titleRef.current?.textContent ?? '').trim()
+    if (!next || next === pageName || validateName(next)) {
+      resetTitle()
+      return
+    }
+    //flush pending edits first so the rename copies the latest content
+    await flushSave()
+    const ok = await onRenamePage(next)
+    if (!ok) resetTitle()
+  }
+
+  function hideTitle() {
+    setTitleHidden(true)
+    setTitleMenu(null)
+    scheduleSave()
+  }
+
+  function showTitle() {
+    setTitleHidden(false)
+    scheduleSave()
+  }
+
   //grow the scroll area so boxes dragged outward extend the canvas
   const extent = boxes.reduce(
     (acc, b) => ({
@@ -181,25 +234,116 @@ export function PageCanvas({ pageKey, content, onSave }: Props) {
 
       {contentEl &&
         createPortal(
-          <div
-            className="pointer-events-none absolute left-0 top-0"
-            style={{ width: extent.w || undefined, height: extent.h || undefined }}
-          >
-            {boxes.map((b) => (
-              <Box
-                key={b.id}
-                box={b}
-                autoFocus={b.id === focusId}
-                initialHtml={boxHtml.current[b.id] ?? b.html}
-                onInput={(html) => onBoxInput(b.id, html)}
-                onMove={(x, y) => updateBox(b.id, { x, y })}
-                onResize={(w) => updateBox(b.id, { w })}
-                onRemove={() => removeBox(b.id)}
-              />
-            ))}
-          </div>,
+          <>
+            {titleHidden ? (
+              <button
+                className="page-title-add"
+                onClick={showTitle}
+                title="show the title"
+              >
+                <Plus className="size-3.5" aria-hidden />
+                Add title
+              </button>
+            ) : (
+              <div
+                className="page-title"
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  setTitleMenu({ x: e.clientX, y: e.clientY })
+                }}
+              >
+                <div
+                  ref={titleRef}
+                  className="page-title-input"
+                  contentEditable
+                  suppressContentEditableWarning
+                  spellCheck={false}
+                  data-placeholder="Untitled page"
+                  onBlur={commitTitle}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      e.currentTarget.blur()
+                    } else if (e.key === 'Escape') {
+                      resetTitle()
+                      e.currentTarget.blur()
+                    }
+                  }}
+                />
+                <div className="page-title-rule" />
+                <div className="page-title-date">
+                  <span>{formatCreated(created.current).date}</span>
+                  <span className="page-title-time">
+                    {formatCreated(created.current).time}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            <div
+              className="pointer-events-none absolute left-0 top-0"
+              style={{ width: extent.w || undefined, height: extent.h || undefined }}
+            >
+              {boxes.map((b) => (
+                <Box
+                  key={b.id}
+                  box={b}
+                  autoFocus={b.id === focusId}
+                  initialHtml={boxHtml.current[b.id] ?? b.html}
+                  onInput={(html) => onBoxInput(b.id, html)}
+                  onMove={(x, y) => updateBox(b.id, { x, y })}
+                  onResize={(w) => updateBox(b.id, { w })}
+                  onRemove={() => removeBox(b.id)}
+                />
+              ))}
+            </div>
+          </>,
           contentEl,
         )}
+
+      {titleMenu && (
+        <TitleMenu menu={titleMenu} onClose={() => setTitleMenu(null)} onHide={hideTitle} />
+      )}
+    </div>
+  )
+}
+
+//tiny right click menu for the title header
+function TitleMenu({
+  menu,
+  onClose,
+  onHide,
+}: {
+  menu: { x: number; y: number }
+  onClose: () => void
+  onHide: () => void
+}) {
+  useEffect(() => {
+    const close = () => onClose()
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  return (
+    <div
+      role="menu"
+      className="fixed z-50 min-w-40 overflow-hidden rounded-md border border-border bg-popover py-1 text-sm shadow-md"
+      style={{ left: menu.x, top: menu.y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <button
+        role="menuitem"
+        onClick={onHide}
+        className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left outline-none hover:bg-accent"
+      >
+        <EyeOff className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Hide title area
+      </button>
     </div>
   )
 }

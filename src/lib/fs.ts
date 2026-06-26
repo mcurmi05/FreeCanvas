@@ -1,4 +1,5 @@
 import type { NotebookEntry, PageNode } from '../types'
+import { blankPage } from './pageDoc'
 
 //page files are plain html for the rough prototype
 export const PAGE_EXT = '.html'
@@ -254,7 +255,7 @@ export async function createPage(
   name: string,
 ): Promise<FileSystemFileHandle> {
   const handle = await dir.getFileHandle(name + PAGE_EXT, { create: true })
-  await writePage(handle, '<p></p>')
+  await writePage(handle, blankPage())
   return handle
 }
 
