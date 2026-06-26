@@ -1,18 +1,29 @@
 import { create } from 'zustand'
-import type { LibraryRef, NotebookEntry } from '../types'
+import type { LibraryRef, NotebookEntry, PageEntry } from '../types'
 import {
+  createPage,
   createSubfolder,
   directoryExists,
+  fileExists,
   listNotebooks,
+  listPages,
   pickLibraryDirectory,
+  readPage,
   verifyPermission,
+  writePage,
 } from '../lib/fs'
 import { forgetLibrary, rememberLibrary } from '../lib/recentLibraries'
+
+type SaveState = 'idle' | 'saving' | 'saved'
 
 interface AppState {
   library: LibraryRef | null
   notebooks: NotebookEntry[]
   activeNotebook: NotebookEntry | null
+  pages: PageEntry[]
+  activePage: PageEntry | null
+  pageContent: string
+  saveState: SaveState
   loading: boolean
   error: string | null
 
@@ -29,10 +40,17 @@ interface AppState {
 
   //create a notebook subfolder inside the open library
   createNotebook: (name: string) => Promise<boolean>
-  //enter a notebook
-  openNotebook: (notebook: NotebookEntry) => void
+  //enter a notebook and load its pages
+  openNotebook: (notebook: NotebookEntry) => Promise<void>
   //leave the open notebook, back to the library
   closeNotebook: () => void
+
+  //create a page inside the open notebook and open it
+  createNotebookPage: (name: string) => Promise<boolean>
+  //open a page and load its html
+  openPage: (page: PageEntry) => Promise<void>
+  //persist the current page html
+  savePage: (html: string) => Promise<void>
 }
 
 //shared loader, remember the library and pull its notebooks
@@ -42,7 +60,15 @@ async function loadLibrary(
 ): Promise<LibraryRef> {
   const ref = await rememberLibrary(handle)
   const notebooks = await listNotebooks(handle)
-  set({ library: ref, notebooks, activeNotebook: null, loading: false })
+  set({
+    library: ref,
+    notebooks,
+    activeNotebook: null,
+    pages: [],
+    activePage: null,
+    pageContent: '',
+    loading: false,
+  })
   return ref
 }
 
@@ -50,6 +76,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   library: null,
   notebooks: [],
   activeNotebook: null,
+  pages: [],
+  activePage: null,
+  pageContent: '',
+  saveState: 'idle',
   loading: false,
   error: null,
 
@@ -104,7 +134,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   closeLibrary: () =>
-    set({ library: null, notebooks: [], activeNotebook: null }),
+    set({
+      library: null,
+      notebooks: [],
+      activeNotebook: null,
+      pages: [],
+      activePage: null,
+      pageContent: '',
+    }),
 
   createNotebook: async (name) => {
     const library = get().library
@@ -126,7 +163,59 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  openNotebook: (notebook) => set({ activeNotebook: notebook }),
+  openNotebook: async (notebook) => {
+    //set active first so route guards pass immediately
+    set({ activeNotebook: notebook, pages: [], activePage: null, pageContent: '' })
+    try {
+      const pages = await listPages(notebook.handle)
+      set({ pages })
+    } catch (err) {
+      set({ error: (err as Error).message })
+    }
+  },
 
-  closeNotebook: () => set({ activeNotebook: null }),
+  closeNotebook: () =>
+    set({ activeNotebook: null, pages: [], activePage: null, pageContent: '' }),
+
+  createNotebookPage: async (name) => {
+    const notebook = get().activeNotebook
+    if (!notebook) return false
+    set({ loading: true, error: null })
+    try {
+      const fileName = name.trim() + '.html'
+      if (await fileExists(notebook.handle, fileName)) {
+        set({ loading: false, error: 'a page with that name already exists' })
+        return false
+      }
+      const page = await createPage(notebook.handle, name.trim())
+      const pages = await listPages(notebook.handle)
+      set({ pages, activePage: page, pageContent: '<p></p>', loading: false })
+      return true
+    } catch (err) {
+      set({ loading: false, error: (err as Error).message })
+      return false
+    }
+  },
+
+  openPage: async (page) => {
+    set({ activePage: page, pageContent: '', saveState: 'idle' })
+    try {
+      const html = await readPage(page.handle)
+      set({ pageContent: html })
+    } catch (err) {
+      set({ error: (err as Error).message })
+    }
+  },
+
+  savePage: async (html) => {
+    const page = get().activePage
+    if (!page) return
+    set({ saveState: 'saving' })
+    try {
+      await writePage(page.handle, html)
+      set({ pageContent: html, saveState: 'saved' })
+    } catch (err) {
+      set({ saveState: 'idle', error: (err as Error).message })
+    }
+  },
 }))

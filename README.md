@@ -8,6 +8,7 @@ An offline first PWA notebook. A OneNote style infinite canvas where you own the
 - vite-plugin-pwa (manifest and Workbox service worker)
 - Zustand for state, idb-keyval for persisting folder handles
 - Tailwind CSS v4 with shadcn style components (cva and tailwind-merge), lucide-react icons
+- TipTap rich text editing via reactjs-tiptap-editor for the page toolbar
 
 ## Features
 

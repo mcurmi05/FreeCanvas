@@ -1,4 +1,14 @@
-import type { NotebookEntry } from '../types'
+import type { NotebookEntry, PageEntry } from '../types'
+
+//page files are plain html for the rough prototype
+export const PAGE_EXT = '.html'
+
+//drop the page extension for display
+export function pageTitle(fileName: string): string {
+  return fileName.endsWith(PAGE_EXT)
+    ? fileName.slice(0, -PAGE_EXT.length)
+    : fileName
+}
 
 //feature detect the file system access api, chromium only for now
 export function isFileSystemAccessSupported(): boolean {
@@ -104,4 +114,59 @@ export async function listNotebooks(
   }
   entries.sort((a, b) => a.name.localeCompare(b.name))
   return entries
+}
+
+//list pages in a notebook, every page is an html file
+export async function listPages(
+  notebook: FileSystemDirectoryHandle,
+): Promise<PageEntry[]> {
+  const entries: PageEntry[] = []
+  for await (const [name, handle] of notebook.entries()) {
+    if (handle.kind === 'file' && name.endsWith(PAGE_EXT)) {
+      entries.push({ name, handle })
+    }
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name))
+  return entries
+}
+
+//true when the notebook already holds a file with this name
+export async function fileExists(
+  notebook: FileSystemDirectoryHandle,
+  name: string,
+): Promise<boolean> {
+  try {
+    await notebook.getFileHandle(name)
+    return true
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'NotFoundError') return false
+    throw err
+  }
+}
+
+//create an empty page file inside a notebook
+export async function createPage(
+  notebook: FileSystemDirectoryHandle,
+  name: string,
+): Promise<PageEntry> {
+  const fileName = name.endsWith(PAGE_EXT) ? name : name + PAGE_EXT
+  const handle = await notebook.getFileHandle(fileName, { create: true })
+  await writePage(handle, '<p></p>')
+  return { name: fileName, handle }
+}
+
+//read a page file as html
+export async function readPage(handle: FileSystemFileHandle): Promise<string> {
+  const file = await handle.getFile()
+  return file.text()
+}
+
+//write html back to a page file
+export async function writePage(
+  handle: FileSystemFileHandle,
+  html: string,
+): Promise<void> {
+  const writable = await handle.createWritable()
+  await writable.write(html)
+  await writable.close()
 }

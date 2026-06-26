@@ -11,3 +11,9 @@ export interface NotebookEntry {
   name: string
   handle: FileSystemDirectoryHandle
 }
+
+//a page is a rich text file inside a notebook, html for the rough prototype
+export interface PageEntry {
+  name: string
+  handle: FileSystemFileHandle
+}
