@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import { EyeOff, Plus } from 'lucide-react'
+import { EyeOff } from 'lucide-react'
 import { PageEditor } from '@/components/PageEditor'
 import { validateName } from '@/lib/fs'
 import { DEFAULT_DOC_WIDTH, parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
@@ -13,6 +13,10 @@ interface Props {
   onSave: (html: string) => void | Promise<void>
   //rename the page when the title is edited, returns false on failure
   onRenamePage: (name: string) => Promise<boolean>
+  //bumped from the sidebar menu to toggle the title shown/hidden
+  toggleTitleNonce?: number
+  //report the current title visibility so the sidebar can label its menu item
+  onTitleHiddenChange?: (hidden: boolean) => void
 }
 
 //new boxes auto-size to their text and grow until this width, then wrap. once
@@ -47,7 +51,15 @@ function formatCreated(iso: string): { date: string; time: string } {
 
 //onenote style page, a normal document plus floating text boxes you place
 //anywhere on the blank white canvas, mounted fresh per page via its key
-export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }: Props) {
+export function PageCanvas({
+  pageKey,
+  pageName,
+  content,
+  onSave,
+  onRenamePage,
+  toggleTitleNonce,
+  onTitleHiddenChange,
+}: Props) {
   const wrapper = useRef<HTMLDivElement>(null)
   //the library's scrolling content node, where we portal the title and boxes
   const [contentEl, setContentEl] = useState<HTMLElement | null>(null)
@@ -157,7 +169,6 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
         t.closest('.ProseMirror') ||
         t.closest('.canvas-box') ||
         t.closest('.page-title') ||
-        t.closest('.page-title-add') ||
         t.closest('.doc-width-bar')
       )
         return
@@ -307,10 +318,20 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
     scheduleSave()
   }
 
-  function showTitle() {
-    setTitleHidden(false)
-    scheduleSave()
-  }
+  //the sidebar menu bumps this nonce to flip the title shown/hidden
+  useEffect(() => {
+    if (toggleTitleNonce) {
+      setTitleHidden((h) => !h)
+      scheduleSave()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toggleTitleNonce])
+
+  //let the sidebar know the current visibility for its menu label
+  useEffect(() => {
+    onTitleHiddenChange?.(titleHidden)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [titleHidden])
 
   //grow the scroll area so boxes dragged outward extend the canvas
   const extent = boxes.reduce(
@@ -347,16 +368,9 @@ export function PageCanvas({ pageKey, pageName, content, onSave, onRenamePage }:
               />
             </div>
 
-            {titleHidden ? (
-              <button
-                className="page-title-add"
-                onClick={showTitle}
-                title="show the title"
-              >
-                <Plus className="size-3.5" aria-hidden />
-                Add title
-              </button>
-            ) : (
+            {/*title hidden: nothing here, bring it back via the sidebar
+               right-click menu (which bumps toggleTitleNonce)*/}
+            {!titleHidden && (
               <div
                 className="page-title"
                 onContextMenu={(e) => {

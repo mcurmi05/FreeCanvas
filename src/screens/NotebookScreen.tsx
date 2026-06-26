@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import {
   ChevronLeft,
   ChevronRight,
+  Eye,
+  EyeOff,
   FilePlus,
   FileText,
   Folder,
@@ -75,6 +77,10 @@ export function NotebookScreen() {
   const [rename, setRename] = useState<PageNode | null>(null)
   const renameNode = useAppStore((s) => s.renameNode)
   const [draggingPath, setDraggingPath] = useState<string | null>(null)
+  //bumped to ask the active page's canvas to flip the title shown/hidden, plus
+  //the title's current visibility so the menu can label show vs hide
+  const [toggleTitleNonce, setToggleTitleNonce] = useState(0)
+  const [activeTitleHidden, setActiveTitleHidden] = useState(false)
 
   //sidebar width and collapsed state survive reloads
   const [width, setWidth] = useState(() => {
@@ -265,6 +271,8 @@ export function NotebookScreen() {
             content={pageContent}
             onSave={savePage}
             onRenamePage={(name) => renameNode(activePage.path, name)}
+            toggleTitleNonce={toggleTitleNonce}
+            onTitleHiddenChange={setActiveTitleHidden}
           />
         ) : (
           <div className="grid flex-1 place-items-center p-10 text-center">
@@ -283,10 +291,13 @@ export function NotebookScreen() {
       {menu && (
         <SidebarMenu
           menu={menu}
+          activePagePath={activePage?.path ?? null}
+          activeTitleHidden={activeTitleHidden}
           onClose={() => setMenu(null)}
           onNew={(kind, parentPath) => setDialog({ kind, parentPath })}
           onRename={(node) => setRename(node)}
           onDelete={(node) => setConfirm(node)}
+          onToggleTitle={() => setToggleTitleNonce((n) => n + 1)}
         />
       )}
 
@@ -351,16 +362,22 @@ function DeleteDialog({ node, onClose }: { node: PageNode; onClose: () => void }
 //floating right click menu for a node, or for the root when node is null
 function SidebarMenu({
   menu,
+  activePagePath,
+  activeTitleHidden,
   onClose,
   onNew,
   onRename,
   onDelete,
+  onToggleTitle,
 }: {
   menu: MenuState
+  activePagePath: string | null
+  activeTitleHidden: boolean
   onClose: () => void
   onNew: (kind: PageKind, parentPath?: string) => void
   onRename: (node: PageNode) => void
   onDelete: (node: PageNode) => void
+  onToggleTitle: () => void
 }) {
   const makeSubpage = useAppStore((s) => s.makeSubpage)
   const promotePage = useAppStore((s) => s.promotePage)
@@ -408,6 +425,16 @@ function SidebarMenu({
           <MenuItem icon={Outdent} onClick={() => run(() => promotePage(node.path))}>
             Promote page
           </MenuItem>
+          {/*only the open page can toggle its title, that state lives in the
+             mounted canvas*/}
+          {node.kind === 'page' && node.path === activePagePath && (
+            <MenuItem
+              icon={activeTitleHidden ? Eye : EyeOff}
+              onClick={() => run(onToggleTitle)}
+            >
+              {activeTitleHidden ? 'Show title' : 'Hide title'}
+            </MenuItem>
+          )}
           <div className="my-1 h-px bg-border" />
           <MenuItem icon={Pencil} onClick={() => run(() => onRename(node))}>
             Rename {node.kind}

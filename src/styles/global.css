@@ -240,25 +240,6 @@
   margin-left: 1rem;
 }
 
-/*shown in place of the title when it is hidden, click to bring it back*/
-.page-title-add {
-  order: -1;
-  flex: 0 0 auto;
-  align-self: flex-start;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin: 8px 0 0 40px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  color: var(--muted-foreground);
-}
-
-.page-title-add:hover {
-  background: var(--accent);
-}
-
 /*no block drag handle or insert (+) button, the document types like word*/
 .editor-fill .drag-handle {
   display: none !important;
