@@ -9,8 +9,10 @@ import {
 import { createPortal } from 'react-dom'
 import { Check, Crop, EyeOff, ImagePlus, Trash2 } from 'lucide-react'
 import { PageEditor } from '@/components/PageEditor'
-import { attachmentUrl } from '@/lib/attachments'
-import { importImage, isImage } from '@/lib/importFiles'
+import { attachmentUrl, deleteAttachment, readAttachment, writeAttachment } from '@/lib/attachments'
+import { importAttachment, importImage, isImage, isPdf } from '@/lib/importFiles'
+import { ImportChoiceDialog, type ImportChoice } from '@/components/ImportChoiceDialog'
+import { File as FileIcon, FileText } from 'lucide-react'
 import { validateName } from '@/lib/fs'
 import { DEFAULT_DOC_WIDTH, parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
 
@@ -39,6 +41,8 @@ interface Props {
 const BOX_MAX_W = 520
 //default on-canvas width for a freshly imported image, before any resize
 const DEFAULT_IMG_W = 360
+//warn before rasterising a pdf with more pages than this
+const PRINTOUT_WARN_PAGES = 30
 const SCROLL_PAD = 240
 //frame padding (.canvas-box-frame), subtracted on create so the caret lands
 //on the click point rather than offset by the padding
@@ -165,12 +169,39 @@ export function PageCanvas({
     }
   }, [boxes, pageDir])
 
-  //revoke every object url when the page unmounts so blobs do not leak
+  //undo/redo for box deletions. each entry holds the removed box (and its text
+  //html) so it can be restored. a media file is only erased from disk once its
+  //deletion drops off the undo history, so undo can always bring it back
+  const undoStack = useRef<{ box: BoxMeta; html?: string }[]>([])
+  const redoStack = useRef<{ box: BoxMeta; html?: string }[]>([])
+  const UNDO_CAP = 50
+  //latest pageDir for the finalizer, which may run from a once-bound listener
+  const pageDirRef = useRef(pageDir)
+  pageDirRef.current = pageDir
+
+  //a deletion is now permanent: drop the box's text and, if no remaining box
+  //still uses its file, revoke the url and erase the file from attachments
+  function finalizeDelete(action: { box: BoxMeta; html?: string }) {
+    delete boxHtml.current[action.box.id]
+    const file = action.box.file
+    if (!file || boxesRef.current.some((b) => b.file === file)) return
+    const url = mediaUrls.current.get(file)
+    if (url) {
+      URL.revokeObjectURL(url)
+      mediaUrls.current.delete(file)
+    }
+    if (pageDirRef.current) void deleteAttachment(pageDirRef.current, file)
+  }
+
+  //on unmount, every still-pending deletion becomes permanent (the page is
+  //closing, there is no longer anything to undo into), then revoke remaining urls
   useEffect(
     () => () => {
+      undoStack.current.forEach(finalizeDelete)
       mediaUrls.current.forEach((u) => URL.revokeObjectURL(u))
       mediaUrls.current.clear()
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   )
   useEffect(() => {
@@ -261,6 +292,33 @@ export function PageCanvas({
     return () => el.removeEventListener('paste', onPaste, true)
   }, [])
 
+  //undo/redo box deletions with the usual shortcuts. listens on the window so it
+  //fires wherever focus landed after a delete. a pending box deletion takes
+  //precedence over the editor's own undo (you just deleted something, bring it
+  //back first); once the stack drains the editor undoes normally again. form
+  //fields (dialog inputs) keep their native undo
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey)) return
+      const key = e.key.toLowerCase()
+      if (key !== 'z' && key !== 'y') return
+      const t = e.target as HTMLElement
+      if (t.closest?.('input, textarea')) return
+      const redo = key === 'y' || (key === 'z' && e.shiftKey)
+      if (redo) {
+        if (redoStack.current.length) {
+          e.preventDefault()
+          redoRef.current()
+        }
+      } else if (undoStack.current.length) {
+        e.preventDefault()
+        undoRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   //mousedown on the blank canvas (not the document, not a box) creates a text
   //box, mousedown preventDefault keeps focus off the editor so the box keeps it
   useEffect(() => {
@@ -305,19 +363,42 @@ export function PageCanvas({
   }
 
   function removeBox(id: string) {
-    //revoke the box's object url if it had one, the stored file stays on disk
     const box = boxesRef.current.find((b) => b.id === id)
-    if (box?.file) {
-      const url = mediaUrls.current.get(box.file)
-      if (url) {
-        URL.revokeObjectURL(url)
-        mediaUrls.current.delete(box.file)
-      }
+    if (!box) return
+    //record the deletion for undo, keep the file and url around in case it comes
+    //back. evict the oldest action past the cap and make that one permanent
+    undoStack.current.push({ box: { ...box }, html: boxHtml.current[id] })
+    redoStack.current = []
+    while (undoStack.current.length > UNDO_CAP) {
+      finalizeDelete(undoStack.current.shift()!)
     }
-    delete boxHtml.current[id]
     setBoxes((bs) => bs.filter((b) => b.id !== id))
     scheduleSave()
   }
+
+  //bring back the most recently deleted box
+  function undoDelete() {
+    const action = undoStack.current.pop()
+    if (!action) return
+    if (action.html !== undefined) boxHtml.current[action.box.id] = action.html
+    setBoxes((bs) => [...bs, action.box])
+    redoStack.current.push(action)
+    scheduleSave()
+  }
+
+  //re-delete the box an undo brought back
+  function redoDelete() {
+    const action = redoStack.current.pop()
+    if (!action) return
+    setBoxes((bs) => bs.filter((b) => b.id !== action.box.id))
+    undoStack.current.push(action)
+    scheduleSave()
+  }
+  //keep the once-bound key listener pointed at the latest closures
+  const undoRef = useRef(undoDelete)
+  undoRef.current = undoDelete
+  const redoRef = useRef(redoDelete)
+  redoRef.current = redoDelete
 
   function onBoxInput(id: string, html: string) {
     boxHtml.current[id] = html
@@ -335,8 +416,26 @@ export function PageCanvas({
     }
   }
 
+  //a pending attachment/printout prompt for the current non-image file
+  const [pending, setPending] = useState<{ name: string; canPrintout: boolean } | null>(null)
+  const choiceResolver = useRef<((c: ImportChoice | null) => void) | null>(null)
+
+  //open the prompt and resolve once the user picks (or dismisses)
+  function askImportChoice(name: string, canPrintout: boolean): Promise<ImportChoice | null> {
+    return new Promise((resolve) => {
+      choiceResolver.current = resolve
+      setPending({ name, canPrintout })
+    })
+  }
+  function resolveChoice(choice: ImportChoice | null) {
+    setPending(null)
+    choiceResolver.current?.(choice)
+    choiceResolver.current = null
+  }
+
   //import dropped or picked files onto the canvas. images insert silently as
-  //image boxes, stacked with a small offset when several arrive at once
+  //image boxes; other files prompt for attachment vs printout. multiple files
+  //stack with a small offset
   async function importFiles(files: FileList | File[], x: number, y: number) {
     const list = Array.from(files)
     if (!list.length) return
@@ -345,14 +444,89 @@ export function PageCanvas({
     if (!dir) return
     let offset = 0
     for (const file of list) {
+      const px = Math.max(0, x + offset)
+      const py = Math.max(0, y + offset)
       if (isImage(file)) {
-        const box = await importImage(dir, file, Math.max(0, x + offset), Math.max(0, y + offset))
+        const box = await importImage(dir, file, px, py)
         setBoxes((bs) => [...bs, box])
         scheduleSave()
         offset += 24
+        continue
       }
-      //non-image files get an attachment/printout prompt in a later step
+      const choice = await askImportChoice(file.name, isPdf(file.type, file.name))
+      if (!choice) continue
+      if (choice === 'printout' && isPdf(file.type, file.name)) {
+        const pages = await buildPrintoutBoxes(dir, stripExt(file.name), await file.arrayBuffer(), px, py)
+        setBoxes((bs) => [...bs, ...pages])
+        scheduleSave()
+        offset += 24
+        continue
+      }
+      //attachment, or printout fallback for non-pdf files (TODO: docx -> images)
+      const box = await importAttachment(dir, file, px, py)
+      setBoxes((bs) => [...bs, box])
+      scheduleSave()
+      offset += 24
     }
+  }
+
+  //rasterise a pdf into stacked image boxes, each page stored as a png so the
+  //notebook stays self-contained
+  async function buildPrintoutBoxes(
+    dir: FileSystemDirectoryHandle,
+    baseName: string,
+    data: ArrayBuffer,
+    x: number,
+    y: number,
+  ): Promise<BoxMeta[]> {
+    //load the pdf renderer on demand so the heavy library stays out of the
+    //initial bundle
+    const { rasterizePdf } = await import('@/lib/pdfPrintout')
+    //confirm before rasterising very long pdfs, each page becomes a stored png
+    const pages = await rasterizePdf(data, (n) =>
+      n <= PRINTOUT_WARN_PAGES ||
+      window.confirm(
+        `This PDF has ${n} pages. Laying them all out will create ${n} images and may be slow. Continue?`,
+      ),
+    )
+    const out: BoxMeta[] = []
+    let yy = y
+    for (let i = 0; i < pages.length; i++) {
+      const p = pages[i]
+      const stored = await writeAttachment(dir, p.blob, `${baseName}-p${i + 1}.png`)
+      const h = Math.round(DEFAULT_IMG_W / p.aspect)
+      out.push({
+        id: rid(),
+        x,
+        y: yy,
+        w: DEFAULT_IMG_W,
+        h,
+        kind: 'image',
+        file: stored,
+        mime: 'image/png',
+        name: `${baseName} p${i + 1}`,
+        aspect: p.aspect,
+      })
+      yy += h + 16
+    }
+    return out
+  }
+
+  //right-click an attachment pill -> lay its pdf pages out as images below it
+  async function insertPrintout(box: BoxMeta) {
+    const dir = pageDir ?? (await ensurePageDir())
+    if (!dir || !box.file) return
+    const file = await readAttachment(dir, box.file)
+    if (!file) return
+    const pages = await buildPrintoutBoxes(
+      dir,
+      stripExt(box.name ?? 'page'),
+      await file.arrayBuffer(),
+      box.x,
+      box.y + 44,
+    )
+    setBoxes((bs) => [...bs, ...pages])
+    scheduleSave()
   }
   //keep the paste listener pointed at the latest closure (current pageDir etc.)
   importRef.current = importFiles
@@ -617,6 +791,17 @@ export function PageCanvas({
                     onGeom={(patch) => updateBox(b.id, patch)}
                     onRemove={() => removeBox(b.id)}
                   />
+                ) : b.kind === 'attachment' ? (
+                  <AttachmentBox
+                    key={b.id}
+                    box={b}
+                    url={b.file ? mediaUrls.current.get(b.file) : undefined}
+                    onMove={(x, y) => updateBox(b.id, { x, y })}
+                    onRemove={() => removeBox(b.id)}
+                    onInsertPrintout={
+                      isPdf(b.mime, b.name) ? () => insertPrintout(b) : undefined
+                    }
+                  />
                 ) : (
                   <Box
                     key={b.id}
@@ -638,6 +823,12 @@ export function PageCanvas({
       {titleMenu && (
         <TitleMenu menu={titleMenu} onClose={() => setTitleMenu(null)} onHide={hideTitle} />
       )}
+
+      <ImportChoiceDialog
+        fileName={pending?.name ?? null}
+        canPrintout={pending?.canPrintout ?? false}
+        onChoose={resolveChoice}
+      />
     </div>
   )
 }
@@ -1211,6 +1402,157 @@ function CropOverlay({
           <Check className="size-5" aria-hidden />
         </button>
       </div>
+    </div>
+  )
+}
+
+//strip a trailing file extension for display / derived names
+function stripExt(name: string): string {
+  return name.replace(/\.[^.]+$/, '')
+}
+
+//a downloadable file pinned to the canvas: icon + name. drag to move, single
+//click selects, double click opens, right-click for more actions
+function AttachmentBox({
+  box,
+  url,
+  onMove,
+  onRemove,
+  onInsertPrintout,
+}: {
+  box: BoxMeta
+  url?: string
+  onMove: (x: number, y: number) => void
+  onRemove: () => void
+  onInsertPrintout?: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+
+  function startDrag(e: React.PointerEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    ref.current?.focus()
+    const el = e.currentTarget as HTMLElement
+    el.setPointerCapture(e.pointerId)
+    const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y, moved: false }
+    function move(ev: PointerEvent) {
+      const dx = ev.clientX - start.px
+      const dy = ev.clientY - start.py
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) start.moved = true
+      if (start.moved) onMove(Math.max(0, start.x + dx), Math.max(0, start.y + dy))
+    }
+    function up(ev: PointerEvent) {
+      el.releasePointerCapture(ev.pointerId)
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', up)
+      //a plain click only selects, it does not open (double click opens)
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
+  }
+
+  function open() {
+    if (url) window.open(url, '_blank')
+  }
+
+  return (
+    <div
+      ref={ref}
+      className="canvas-box canvas-attachment"
+      style={{ left: box.x, top: box.y }}
+      tabIndex={0}
+      title={box.name ?? box.file}
+      onPointerDown={startDrag}
+      onDoubleClick={open}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        ref.current?.focus()
+        setMenu({ x: e.clientX, y: e.clientY })
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          e.preventDefault()
+          onRemove()
+        } else if (e.key === 'Escape') {
+          e.preventDefault()
+          ref.current?.blur()
+        } else if (e.key === 'Enter') {
+          e.preventDefault()
+          open()
+        }
+      }}
+    >
+      <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+      <span className="canvas-attachment-name">{box.name ?? box.file}</span>
+
+      {menu && (
+        <AttachmentMenu
+          menu={menu}
+          canPrintout={!!onInsertPrintout}
+          onClose={() => setMenu(null)}
+          onOpen={open}
+          onInsertPrintout={() => onInsertPrintout?.()}
+          onRemove={onRemove}
+        />
+      )}
+    </div>
+  )
+}
+
+//right-click menu for an attachment pill
+function AttachmentMenu({
+  menu,
+  canPrintout,
+  onClose,
+  onOpen,
+  onInsertPrintout,
+  onRemove,
+}: {
+  menu: { x: number; y: number }
+  canPrintout: boolean
+  onClose: () => void
+  onOpen: () => void
+  onInsertPrintout: () => void
+  onRemove: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('pointerdown', onClose)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', onClose)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  const item = 'flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm outline-none hover:bg-accent'
+  return (
+    <div
+      role="menu"
+      className="fixed z-50 min-w-44 overflow-hidden rounded-md border border-border bg-popover py-1 shadow-md"
+      style={{ left: menu.x, top: menu.y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <button role="menuitem" className={item} onClick={() => { onOpen(); onClose() }}>
+        <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Open
+      </button>
+      {canPrintout && (
+        <button role="menuitem" className={item} onClick={() => { onInsertPrintout(); onClose() }}>
+          <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          Insert as printout
+        </button>
+      )}
+      <button
+        role="menuitem"
+        className={item}
+        style={{ color: '#dc2626' }}
+        onClick={() => { onRemove(); onClose() }}
+      >
+        <Trash2 className="size-4 shrink-0" style={{ color: '#dc2626' }} aria-hidden />
+        Delete
+      </button>
     </div>
   )
 }

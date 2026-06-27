@@ -34,6 +34,34 @@ export async function writeAttachment(
   return stored
 }
 
+//remove a stored attachment file. missing files are ignored so callers can
+//fire this without worrying about double-deletes
+export async function deleteAttachment(
+  pageDir: FileSystemDirectoryHandle,
+  filename: string,
+): Promise<void> {
+  try {
+    const dir = await getAttachmentsDir(pageDir)
+    await dir.removeEntry(filename)
+  } catch {
+    //already gone or no attachments folder, nothing to do
+  }
+}
+
+//read a stored attachment back as a File, null when missing
+export async function readAttachment(
+  pageDir: FileSystemDirectoryHandle,
+  filename: string,
+): Promise<File | null> {
+  try {
+    const dir = await getAttachmentsDir(pageDir)
+    const handle = await dir.getFileHandle(filename)
+    return await handle.getFile()
+  } catch {
+    return null
+  }
+}
+
 //resolve a stored attachment to an object url for display or download. returns
 //null when the file is missing so callers can render a broken-state widget
 export async function attachmentUrl(
