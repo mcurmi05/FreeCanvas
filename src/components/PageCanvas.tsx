@@ -213,6 +213,55 @@ export function PageCanvas({
     return () => cancelAnimationFrame(raf)
   }, [pageKey])
 
+  //mirror the content node and latest import handler into refs so the paste
+  //listener, attached once in capture phase, always sees the current values
+  const contentElRef = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    contentElRef.current = contentEl
+  }, [contentEl])
+  const importRef = useRef<
+    (files: FileList | File[], x: number, y: number) => void
+  >(() => {})
+
+  //intercept pasted images anywhere on the page (document, a box, or the bare
+  //canvas) in capture phase, before prosemirror or a contentEditable can embed
+  //them. route them through the same import path as drop so behaviour matches
+  useEffect(() => {
+    const el = wrapper.current
+    if (!el) return
+    function onPaste(e: ClipboardEvent) {
+      const dt = e.clipboardData
+      if (!dt) return
+      const imgs: File[] = []
+      for (const item of Array.from(dt.items)) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const f = item.getAsFile()
+          //clipboard images often have no name, give them a stable one
+          if (f) imgs.push(f.name ? f : new File([f], 'pasted-image.png', { type: f.type }))
+        }
+      }
+      if (!imgs.length) return
+      e.preventDefault()
+      e.stopPropagation()
+      //drop at the caret when we can locate it, else near the top of the view
+      const ce = contentElRef.current
+      const rect = ce?.getBoundingClientRect()
+      const sel = window.getSelection()
+      let x = (ce?.scrollLeft ?? 0) + 80
+      let y = (ce?.scrollTop ?? 0) + 140
+      if (ce && rect && sel && sel.rangeCount) {
+        const r = sel.getRangeAt(0).getBoundingClientRect()
+        if (r.width || r.height || r.left) {
+          x = r.left - rect.left + ce.scrollLeft - BOX_PAD_X
+          y = r.top - rect.top + ce.scrollTop - BOX_PAD_Y
+        }
+      }
+      importRef.current(imgs, Math.max(0, x), Math.max(0, y))
+    }
+    el.addEventListener('paste', onPaste, true)
+    return () => el.removeEventListener('paste', onPaste, true)
+  }, [])
+
   //mousedown on the blank canvas (not the document, not a box) creates a text
   //box, mousedown preventDefault keeps focus off the editor so the box keeps it
   useEffect(() => {
@@ -306,6 +355,8 @@ export function PageCanvas({
       //non-image files get an attachment/printout prompt in a later step
     }
   }
+  //keep the paste listener pointed at the latest closure (current pageDir etc.)
+  importRef.current = importFiles
 
   //the toolbar import button feeds files through a hidden picker
   const fileInput = useRef<HTMLInputElement>(null)
@@ -457,7 +508,8 @@ export function PageCanvas({
   //box can be tall, estimate its height from its width and aspect ratio
   const extent = boxes.reduce((acc, b) => {
     const w = b.w ?? (b.kind === 'image' ? DEFAULT_IMG_W : BOX_MAX_W)
-    const h = b.kind === 'image' && b.aspect ? w / b.aspect : 80
+    const h =
+      b.kind === 'image' ? (b.h ?? (b.aspect ? w / b.aspect : w)) : 80
     return {
       w: Math.max(acc.w, b.x + w + SCROLL_PAD),
       h: Math.max(acc.h, b.y + h + SCROLL_PAD),
@@ -474,7 +526,8 @@ export function PageCanvas({
     >
       <PageEditor key={pageKey} content={docHtml.current} onSave={onDocChange} />
 
-      {/*hidden picker + floating import button, top-right of the canvas*/}
+      {/*hidden picker + import button, vertically centered in the 48px toolbar
+         strip at the top of the editor*/}
       <input
         ref={fileInput}
         type="file"
@@ -482,15 +535,17 @@ export function PageCanvas({
         className="hidden"
         onChange={onPickFiles}
       />
-      <button
-        type="button"
-        onClick={() => fileInput.current?.click()}
-        className="absolute right-4 top-3 z-20 flex items-center gap-1.5 rounded-md border border-border bg-background/90 px-2.5 py-1.5 text-sm shadow-sm outline-none hover:bg-accent"
-        title="import images or files onto this page"
-      >
-        <ImagePlus className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-        Import
-      </button>
+      <div className="absolute right-4 top-0 z-20 flex h-12 items-center">
+        <button
+          type="button"
+          onClick={() => fileInput.current?.click()}
+          className="flex items-center gap-1.5 rounded-md border border-border bg-background/90 px-2.5 py-1.5 text-sm shadow-sm outline-none hover:bg-accent"
+          title="import images or files onto this page"
+        >
+          <ImagePlus className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          Import
+        </button>
+      </div>
 
       {contentEl &&
         createPortal(
@@ -560,8 +615,8 @@ export function PageCanvas({
                     key={b.id}
                     box={b}
                     url={b.file ? mediaUrls.current.get(b.file) : undefined}
-                    onMove={(x, y) => updateBox(b.id, { x, y })}
-                    onResize={(w) => updateBox(b.id, { w })}
+                    onGeom={(patch) => updateBox(b.id, patch)}
+                    onRemove={() => removeBox(b.id)}
                   />
                 ) : (
                   <Box
@@ -638,56 +693,98 @@ interface BoxProps {
   onRemove: () => void
 }
 
-//shared pointer drag: move the box, clamped to the positive canvas
-function dragBox(
-  e: React.PointerEvent,
-  box: BoxMeta,
-  onMove: (x: number, y: number) => void,
-) {
-  e.preventDefault()
-  const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y }
-  const el = e.currentTarget as HTMLElement
-  el.setPointerCapture(e.pointerId)
-  document.body.style.cursor = 'move'
-  function move(ev: PointerEvent) {
-    onMove(
-      Math.max(0, start.x + ev.clientX - start.px),
-      Math.max(0, start.y + ev.clientY - start.py),
-    )
-  }
-  function up(ev: PointerEvent) {
-    el.releasePointerCapture(ev.pointerId)
-    el.removeEventListener('pointermove', move)
-    el.removeEventListener('pointerup', up)
-    document.body.style.cursor = ''
-  }
-  el.addEventListener('pointermove', move)
-  el.addEventListener('pointerup', up)
-}
+//the eight resize handles around an image. corners scale (keep the current w/h
+//ratio), edges stretch one dimension freely
+type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
+const HANDLES: { dir: ResizeDir; cls: string; cursor: string }[] = [
+  { dir: 'nw', cls: 'left-0 top-0 -translate-x-1/2 -translate-y-1/2', cursor: 'nwse-resize' },
+  { dir: 'n', cls: 'left-1/2 top-0 -translate-x-1/2 -translate-y-1/2', cursor: 'ns-resize' },
+  { dir: 'ne', cls: 'right-0 top-0 translate-x-1/2 -translate-y-1/2', cursor: 'nesw-resize' },
+  { dir: 'e', cls: 'right-0 top-1/2 translate-x-1/2 -translate-y-1/2', cursor: 'ew-resize' },
+  { dir: 'se', cls: 'right-0 bottom-0 translate-x-1/2 translate-y-1/2', cursor: 'nwse-resize' },
+  { dir: 's', cls: 'left-1/2 bottom-0 -translate-x-1/2 translate-y-1/2', cursor: 'ns-resize' },
+  { dir: 'sw', cls: 'left-0 bottom-0 -translate-x-1/2 translate-y-1/2', cursor: 'nesw-resize' },
+  { dir: 'w', cls: 'left-0 top-1/2 -translate-x-1/2 -translate-y-1/2', cursor: 'ew-resize' },
+]
+const MIN_IMG = 40
 
-//a non-editable image dropped on the canvas, drag to move, drag the right edge
-//to resize. height follows the natural aspect so resizing stays locked
+//a non-editable image dropped on the canvas. click to select (then Delete or
+//Backspace removes it), drag the body to move, drag a corner to scale or an
+//edge to stretch
 function ImageBox({
   box,
   url,
-  onMove,
-  onResize,
+  onGeom,
+  onRemove,
 }: {
   box: BoxMeta
   url?: string
-  onMove: (x: number, y: number) => void
-  onResize: (w: number) => void
+  onGeom: (patch: Partial<BoxMeta>) => void
+  onRemove: () => void
 }) {
-  const width = box.w ?? DEFAULT_IMG_W
+  const ref = useRef<HTMLDivElement>(null)
+  const [selected, setSelected] = useState(false)
+  const w = box.w ?? DEFAULT_IMG_W
+  const h = box.h ?? (box.aspect ? w / box.aspect : w)
 
-  function startResize(e: React.PointerEvent) {
+  //drag the body to reposition, clamped to the positive canvas
+  function startDrag(e: React.PointerEvent) {
+    e.preventDefault()
+    ref.current?.focus()
+    const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y }
+    const el = e.currentTarget as HTMLElement
+    el.setPointerCapture(e.pointerId)
+    document.body.style.cursor = 'move'
+    function move(ev: PointerEvent) {
+      onGeom({
+        x: Math.max(0, start.x + ev.clientX - start.px),
+        y: Math.max(0, start.y + ev.clientY - start.py),
+      })
+    }
+    function up(ev: PointerEvent) {
+      el.releasePointerCapture(ev.pointerId)
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', up)
+      document.body.style.cursor = ''
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
+  }
+
+  //resize from a handle. corners (two-letter dir) scale uniformly, edges move
+  //a single side. the opposite side stays pinned by shifting x/y as needed
+  function startResize(e: React.PointerEvent, dir: ResizeDir) {
     e.preventDefault()
     e.stopPropagation()
+    ref.current?.focus()
     const el = e.currentTarget as HTMLElement
-    const start = { px: e.clientX, w: width }
     el.setPointerCapture(e.pointerId)
+    const s = { px: e.clientX, py: e.clientY, x: box.x, y: box.y, w, h }
     function move(ev: PointerEvent) {
-      onResize(Math.max(40, start.w + ev.clientX - start.px))
+      const dx = ev.clientX - s.px
+      const dy = ev.clientY - s.py
+      let { x, y, w: nw, h: nh } = s
+      if (dir.length === 2) {
+        //corner scale, drive the new width by the horizontal drag then keep the
+        //starting ratio for the height
+        const right = dir.includes('e')
+        nw = Math.max(MIN_IMG, right ? s.w + dx : s.w - dx)
+        const scale = nw / s.w
+        nh = s.h * scale
+        if (!right) x = s.x + (s.w - nw)
+        if (!dir.includes('s')) y = s.y + (s.h - nh)
+      } else if (dir === 'e') {
+        nw = Math.max(MIN_IMG, s.w + dx)
+      } else if (dir === 'w') {
+        nw = Math.max(MIN_IMG, s.w - dx)
+        x = s.x + (s.w - nw)
+      } else if (dir === 's') {
+        nh = Math.max(MIN_IMG, s.h + dy)
+      } else if (dir === 'n') {
+        nh = Math.max(MIN_IMG, s.h - dy)
+        y = s.y + (s.h - nh)
+      }
+      onGeom({ x, y, w: nw, h: nh })
     }
     function up(ev: PointerEvent) {
       el.releasePointerCapture(ev.pointerId)
@@ -700,26 +797,39 @@ function ImageBox({
 
   return (
     <div
-      className="canvas-box canvas-image group"
-      style={{ left: box.x, top: box.y, width }}
+      ref={ref}
+      className={`canvas-box canvas-image${selected ? ' is-selected' : ''}`}
+      style={{ left: box.x, top: box.y, width: w, height: h }}
+      tabIndex={0}
       onPointerDown={(e) => e.stopPropagation()}
+      onFocus={() => setSelected(true)}
+      onBlur={() => setSelected(false)}
+      onKeyDown={(e) => {
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          e.preventDefault()
+          onRemove()
+        }
+      }}
     >
-      <div className="canvas-image-frame" onPointerDown={(e) => dragBox(e, box, onMove)}>
+      <div className="canvas-image-frame" onPointerDown={startDrag}>
         {url ? (
           <img src={url} alt={box.name ?? ''} draggable={false} />
         ) : (
-          //placeholder box sized by aspect while the object url resolves
-          <div
-            className="canvas-image-loading"
-            style={{ aspectRatio: box.aspect || 1 }}
-          />
+          <div className="canvas-image-loading" />
         )}
       </div>
-      <div
-        onPointerDown={startResize}
-        className="absolute -right-1 top-0 h-full w-2 cursor-ew-resize opacity-0 group-hover:opacity-100"
-        aria-hidden
-      />
+
+      {/*handles only while selected: corners scale, edges stretch*/}
+      {selected &&
+        HANDLES.map((hd) => (
+          <div
+            key={hd.dir}
+            className={`canvas-image-handle absolute ${hd.cls}`}
+            style={{ cursor: hd.cursor }}
+            onPointerDown={(e) => startResize(e, hd.dir)}
+            aria-hidden
+          />
+        ))}
     </div>
   )
 }

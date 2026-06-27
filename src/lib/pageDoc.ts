@@ -11,6 +11,9 @@ export interface BoxMeta {
   //undefined until the user drags to resize, then a fixed pixel width. while
   //undefined the box auto-sizes to its text
   w?: number
+  //explicit pixel height, image boxes only, set once stretched or scaled. when
+  //undefined an image sizes its height from its width and aspect ratio
+  h?: number
   html: string
   //what the box holds, defaults to text. omitted on disk for clean text files
   kind?: 'text' | 'image' | 'attachment'
@@ -70,6 +73,7 @@ export function parsePage(content: string): ParsedPage {
   const boxes: BoxMeta[] = []
   tpl.content.querySelectorAll<HTMLElement>('[data-canvas-box]').forEach((el) => {
     const w = parseFloat(el.style.width)
+    const h = parseFloat(el.style.height)
     const kindAttr = el.getAttribute('data-kind')
     const kind =
       kindAttr === 'image' || kindAttr === 'attachment' ? kindAttr : undefined
@@ -80,6 +84,7 @@ export function parsePage(content: string): ParsedPage {
       y: parseFloat(el.style.top) || 0,
       //no stored width means the box still auto-sizes to its text
       w: isNaN(w) ? undefined : w,
+      h: isNaN(h) ? undefined : h,
       //media boxes carry no inner html, the file is resolved at runtime
       html: kind ? '' : el.innerHTML,
       kind,
@@ -116,6 +121,8 @@ export function serializePage(
     .map((b) => {
       //only write a width once the box has been resized, else it stays auto
       const w = b.w === undefined ? '' : `;width:${Math.round(b.w)}px`
+      //height is image-only, written once the box has been scaled or stretched
+      const h = b.h === undefined ? '' : `;height:${Math.round(b.h)}px`
       //media metadata, only present on image and attachment boxes. text boxes
       //write none of these and keep their old clean markup
       const media =
@@ -130,7 +137,7 @@ export function serializePage(
       const inner = b.kind && b.kind !== 'text' ? '' : b.html
       return `<div data-canvas-box style="left:${Math.round(b.x)}px;top:${Math.round(
         b.y,
-      )}px${w}"${media}>${inner}</div>`
+      )}px${w}${h}"${media}>${inner}</div>`
     })
     .join('')
   return `<div data-canvas-doc${createdAttr}${hiddenAttr}${widthAttr}>${docHtml}</div>${boxHtml}`

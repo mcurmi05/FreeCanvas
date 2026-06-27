@@ -355,10 +355,16 @@
   box-shadow: 0 0 0 2px #9ca3af;
 }
 
-/*image boxes: the whole frame is the drag handle, the image fills its width and
-  scales by aspect. grey ring on hover hints it is selectable/draggable*/
+/*image boxes: the whole frame is the drag handle, the image fills the box so
+  edges stretch and corners scale. grey ring on hover, blue when selected*/
+.canvas-image {
+  outline: none;
+}
+
 .canvas-image-frame {
   cursor: move;
+  width: 100%;
+  height: 100%;
   border-radius: 4px;
   overflow: hidden;
   box-shadow: 0 0 0 1px transparent;
@@ -369,16 +375,31 @@
   box-shadow: 0 0 0 2px #9ca3af;
 }
 
+.canvas-image.is-selected .canvas-image-frame {
+  box-shadow: 0 0 0 2px #3b82f6;
+}
+
 .canvas-image-frame img {
   display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
+  object-fit: fill;
   user-select: none;
 }
 
 /*neutral placeholder shown while the object url resolves*/
 .canvas-image-loading {
   width: 100%;
+  height: 100%;
   background: #f3f4f6;
+}
+
+/*small square grips shown around a selected image*/
+.canvas-image-handle {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 0 0 1.5px #3b82f6;
 }
 
