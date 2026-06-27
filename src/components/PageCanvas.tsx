@@ -10,21 +10,32 @@ import { createPortal } from 'react-dom'
 import {
   ArrowDown,
   ArrowDownToLine,
+  AlignLeft,
+  AlignRight,
   ArrowUp,
   ArrowUpToLine,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Crop,
   EyeOff,
   ImagePlus,
+  PanelRightClose,
+  PanelRightOpen,
+  Presentation,
+  RectangleHorizontal,
+  ScrollText,
+  StretchVertical,
   Trash2,
 } from 'lucide-react'
 import { PageEditor, type EditorCan } from '@/components/PageEditor'
 import { attachmentUrl, deleteAttachment, readAttachment, writeAttachment } from '@/lib/attachments'
 import { importAttachment, importImage, isImage, isPdf } from '@/lib/importFiles'
 import { ImportChoiceDialog, type ImportChoice } from '@/components/ImportChoiceDialog'
-import { File as FileIcon, FileText } from 'lucide-react'
+import { File as FileIcon, FileText, Info } from 'lucide-react'
 import { validateName } from '@/lib/fs'
 import { DEFAULT_DOC_WIDTH, parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
+import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 
 interface Props {
   pageKey: string
@@ -51,6 +62,14 @@ interface Props {
 const BOX_MAX_W = 520
 //default on-canvas width for a freshly imported image, before any resize
 const DEFAULT_IMG_W = 360
+//default width for a freshly imported pdf window, height derives from the
+//first page's aspect. resized freely after, no aspect lock
+const DEFAULT_PDF_W = 460
+//min size a pdf window can be dragged down to
+const MIN_PDF_W = 220
+const MIN_PDF_H = 220
+//css width of a slideshow thumbnail (height follows the page aspect)
+const THUMB_W = 92
 //warn before rasterising a pdf with more pages than this
 const PRINTOUT_WARN_PAGES = 30
 const SCROLL_PAD = 240
@@ -58,6 +77,9 @@ const SCROLL_PAD = 240
 //on the click point rather than offset by the padding
 const BOX_PAD_X = 10
 const BOX_PAD_Y = 8
+//left pad of the document text column in content coords; the doc-width marker
+//(right margin) sits at this + docW, used to right-justify boxes to it
+const DOC_LEFT_PAD = 40
 
 //the creation date and time, shown under the title the way onenote does
 function formatCreated(iso: string): { date: string; time: string } {
@@ -163,7 +185,11 @@ export function PageCanvas({
     if (!pageDir) return
     let cancelled = false
     const files = boxes
-      .filter((b) => (b.kind === 'image' || b.kind === 'attachment') && b.file)
+      .filter(
+        (b) =>
+          (b.kind === 'image' || b.kind === 'attachment' || b.kind === 'pdf') &&
+          b.file,
+      )
       .map((b) => b.file as string)
     ;(async () => {
       for (const file of files) {
@@ -492,6 +518,48 @@ export function PageCanvas({
     scheduleSave()
   }
 
+  //pin a box left/right (or unpin with null). justifying left also parks its
+  //stored x at 0 so unjustifying leaves it there rather than jumping back
+  //set/clear a box's horizontal pin. justifying left parks x at the text margin;
+  //unjustifying keeps the box where it currently sits (the caller measures and
+  //passes that x) instead of snapping back to its old free position
+  function justifyBox(id: string, j: 'left' | 'right' | null, x?: number) {
+    const xPatch =
+      j === 'left' ? { x: DOC_LEFT_PAD } : x !== undefined ? { x } : {}
+    updateBox(id, { justify: j ?? undefined, ...xPatch })
+  }
+
+  //the content x a right-justified box's right edge pins to: the doc-width
+  //marker. a translateX(-100%) on the box turns this into its left edge.
+  //left-justified boxes sit at the same left margin as the title/text column
+  const rightEdgeX = docW + DOC_LEFT_PAD
+  //the box passed to a renderer with its justified horizontal position applied
+  function placed(b: BoxMeta): BoxMeta {
+    if (b.justify === 'left') return { ...b, x: DOC_LEFT_PAD }
+    if (b.justify === 'right') return { ...b, x: rightEdgeX }
+    return b
+  }
+  //drop the x from a drag/resize patch when the box is horizontally pinned, so
+  //it can still move vertically (and resize) without breaking the justify
+  function patchBox(b: BoxMeta, patch: Partial<BoxMeta>) {
+    if (b.justify) {
+      //a move (x/y, no size change) frees the box; a resize keeps it pinned
+      const isMove =
+        (patch.x !== undefined || patch.y !== undefined) &&
+        patch.w === undefined &&
+        patch.h === undefined
+      if (isMove) {
+        updateBox(b.id, { ...patch, justify: undefined })
+      } else {
+        const rest = { ...patch }
+        delete rest.x
+        updateBox(b.id, rest)
+      }
+    } else {
+      updateBox(b.id, patch)
+    }
+  }
+
   function removeBox(id: string) {
     const box = boxesRef.current.find((b) => b.id === id)
     if (!box) return
@@ -628,8 +696,17 @@ export function PageCanvas({
       const choice = await askImportChoice(file.name, isPdf(file.type, file.name))
       if (!choice) continue
       if (choice === 'printout' && isPdf(file.type, file.name)) {
-        const pages = await buildPrintoutBoxes(dir, stripExt(file.name), await file.arrayBuffer(), px, py)
+        //pass the file so the printout also drops the original as an attachment
+        //pill centered above its first page
+        const pages = await buildPrintoutBoxes(dir, stripExt(file.name), await file.arrayBuffer(), px, py, file)
         setBoxes((bs) => [...bs, ...pages])
+        scheduleSave()
+        offset += 24
+        continue
+      }
+      if (choice === 'pdfwindow' && isPdf(file.type, file.name)) {
+        const box = await buildPdfWindowBox(dir, file, px, py)
+        setBoxes((bs) => [...bs, box])
         scheduleSave()
         offset += 24
         continue
@@ -650,6 +727,9 @@ export function PageCanvas({
     data: ArrayBuffer,
     x: number,
     y: number,
+    //when given, the original file is stored and an attachment pill is dropped
+    //centered above the first page
+    attachFile?: File,
   ): Promise<BoxMeta[]> {
     //load the pdf renderer on demand so the heavy library stays out of the
     //initial bundle
@@ -661,8 +741,24 @@ export function PageCanvas({
         `This PDF has ${n} pages. Laying them all out will create ${n} images and may be slow. Continue?`,
       ),
     )
+    if (!pages.length) return []
     const out: BoxMeta[] = []
     let yy = y
+    if (attachFile) {
+      const stored = await writeAttachment(dir, attachFile, attachFile.name)
+      //estimate the pill width to roughly center it over the page column
+      const pillW = 200
+      out.push({
+        id: rid(),
+        x: Math.max(0, x + DEFAULT_IMG_W / 2 - pillW / 2),
+        y: yy,
+        kind: 'attachment',
+        file: stored,
+        mime: attachFile.type,
+        name: attachFile.name,
+      })
+      yy += 44
+    }
     for (let i = 0; i < pages.length; i++) {
       const p = pages[i]
       const stored = await writeAttachment(dir, p.blob, `${baseName}-p${i + 1}.png`)
@@ -682,6 +778,32 @@ export function PageCanvas({
       yy += h + 16
     }
     return out
+  }
+
+  //store a pdf and build a resizable window box that scrolls it inline. sized
+  //page-shaped from the first page's aspect, then resized freely by the user
+  async function buildPdfWindowBox(
+    dir: FileSystemDirectoryHandle,
+    file: File,
+    x: number,
+    y: number,
+  ): Promise<BoxMeta> {
+    const { firstPageAspect } = await import('@/lib/pdfPrintout')
+    const aspect = await firstPageAspect(await file.arrayBuffer())
+    const stored = await writeAttachment(dir, file, file.name)
+    return {
+      id: rid(),
+      x,
+      y,
+      w: DEFAULT_PDF_W,
+      h: Math.round(DEFAULT_PDF_W / aspect),
+      kind: 'pdf',
+      file: stored,
+      mime: file.type,
+      name: file.name,
+      //first page ratio, lets "fit one page" snap without re-reading the pdf
+      aspect,
+    }
   }
 
   //right-click an attachment pill -> lay its pdf pages out as images below it
@@ -854,7 +976,11 @@ export function PageCanvas({
   const extent = boxes.reduce((acc, b) => {
     const w = b.w ?? (b.kind === 'image' ? DEFAULT_IMG_W : BOX_MAX_W)
     const h =
-      b.kind === 'image' ? (b.h ?? (b.aspect ? w / b.aspect : w)) : 80
+      b.kind === 'image'
+        ? (b.h ?? (b.aspect ? w / b.aspect : w))
+        : b.kind === 'pdf'
+          ? (b.h ?? DEFAULT_PDF_W)
+          : 80
     return {
       w: Math.max(acc.w, b.x + w + SCROLL_PAD),
       h: Math.max(acc.h, b.y + h + SCROLL_PAD),
@@ -955,26 +1081,40 @@ export function PageCanvas({
               style={{ width: extent.w || undefined, height: extent.h || undefined }}
             >
               {boxes.map((b) =>
-                b.kind === 'image' ? (
-                  <ImageBox
+                b.kind === 'pdf' ? (
+                  <PdfBox
                     key={b.id}
-                    box={b}
+                    box={placed(b)}
                     url={b.file ? mediaUrls.current.get(b.file) : undefined}
-                    onGeom={(patch) => updateBox(b.id, patch)}
+                    onGeom={(patch) => patchBox(b, patch)}
                     onGeomBegin={() => beginGeom(b.id)}
                     onGeomCommit={() => commitGeom(b.id)}
                     onReorder={(d) => reorderBox(b.id, d)}
+                    onJustify={(j, x) => justifyBox(b.id, j, x)}
+                    onRemove={() => removeBox(b.id)}
+                  />
+                ) : b.kind === 'image' ? (
+                  <ImageBox
+                    key={b.id}
+                    box={placed(b)}
+                    url={b.file ? mediaUrls.current.get(b.file) : undefined}
+                    onGeom={(patch) => patchBox(b, patch)}
+                    onGeomBegin={() => beginGeom(b.id)}
+                    onGeomCommit={() => commitGeom(b.id)}
+                    onReorder={(d) => reorderBox(b.id, d)}
+                    onJustify={(j, x) => justifyBox(b.id, j, x)}
                     onRemove={() => removeBox(b.id)}
                   />
                 ) : b.kind === 'attachment' ? (
                   <AttachmentBox
                     key={b.id}
-                    box={b}
+                    box={placed(b)}
                     url={b.file ? mediaUrls.current.get(b.file) : undefined}
-                    onMove={(x, y) => updateBox(b.id, { x, y })}
+                    onMove={(x, y) => patchBox(b, { x, y })}
                     onGeomBegin={() => beginGeom(b.id)}
                     onGeomCommit={() => commitGeom(b.id)}
                     onReorder={(d) => reorderBox(b.id, d)}
+                    onJustify={(j, x) => justifyBox(b.id, j, x)}
                     onRemove={() => removeBox(b.id)}
                     onInsertPrintout={
                       isPdf(b.mime, b.name) ? () => insertPrintout(b) : undefined
@@ -983,15 +1123,16 @@ export function PageCanvas({
                 ) : (
                   <Box
                     key={b.id}
-                    box={b}
+                    box={placed(b)}
                     autoFocus={b.id === focusId}
                     initialHtml={boxHtml.current[b.id] ?? b.html}
                     onInput={(html) => onBoxInput(b.id, html)}
-                    onMove={(x, y) => updateBox(b.id, { x, y })}
+                    onMove={(x, y) => patchBox(b, { x, y })}
                     onResize={(w) => updateBox(b.id, { w })}
                     onGeomBegin={() => beginGeom(b.id)}
                     onGeomCommit={() => commitGeom(b.id)}
                     onReorder={(d) => reorderBox(b.id, d)}
+                    onJustify={(j, x) => justifyBox(b.id, j, x)}
                     onRemove={() => removeBox(b.id)}
                   />
                 ),
@@ -1054,6 +1195,61 @@ function TitleMenu({
   )
 }
 
+//horizontal pin direction, null clears it
+type JustifyDir = 'left' | 'right'
+
+//the content-x a justified box currently sits at, so unjustifying can leave it
+//in place. offsetLeft is the laid-out left (the placed anchor); a right-pinned
+//box is shifted left by its own width via translateX(-100%), so subtract that
+function justifiedX(el: HTMLElement | null, justify?: JustifyDir): number | undefined {
+  if (!el) return undefined
+  return justify === 'right' ? el.offsetLeft - el.offsetWidth : el.offsetLeft
+}
+
+//the left a body drag should start from. a right-justified box is placed at the
+//marker anchor but drawn its own width to the left (translateX(-100%)); starting
+//from that visual left means a move (which unjustifies it) doesn't jump
+function dragStartX(box: BoxMeta, el: HTMLElement | null): number {
+  return box.justify === 'right' ? box.x - (el?.offsetWidth ?? 0) : box.x
+}
+
+//justify controls rendered as list rows, shared by every box's right-click menu.
+//the active direction reads "Unjustify", the other offers to switch to it
+function JustifyActions({
+  justify,
+  onJustify,
+  onClose,
+}: {
+  justify?: JustifyDir
+  onJustify: (j: JustifyDir | null) => void
+  onClose: () => void
+}) {
+  const item = 'flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm outline-none hover:bg-accent'
+  const rows: { dir: JustifyDir; label: string; Icon: typeof AlignLeft }[] = [
+    { dir: 'left', label: 'Justify left', Icon: AlignLeft },
+    { dir: 'right', label: 'Justify right', Icon: AlignRight },
+  ]
+  return (
+    <>
+      {rows.map(({ dir, label, Icon }) => (
+        <button
+          key={dir}
+          role="menuitem"
+          className={item}
+          onClick={() => {
+            onJustify(justify === dir ? null : dir)
+            onClose()
+          }}
+        >
+          <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          {justify === dir ? `Unjustify ${dir}` : label}
+          {justify === dir && <Check className="ml-auto size-4 shrink-0" aria-hidden />}
+        </button>
+      ))}
+    </>
+  )
+}
+
 //the four stacking moves every box's right-click menu offers
 type ReorderDir = 'front' | 'back' | 'forward' | 'backward'
 const LAYER_ACTIONS: { dir: ReorderDir; label: string; Icon: typeof ArrowUp }[] = [
@@ -1104,6 +1300,7 @@ interface BoxProps {
   onGeomBegin: () => void
   onGeomCommit: () => void
   onReorder: (d: ReorderDir) => void
+  onJustify: (j: JustifyDir | null, x?: number) => void
   onRemove: () => void
 }
 
@@ -1132,6 +1329,7 @@ function ImageBox({
   onGeomBegin,
   onGeomCommit,
   onReorder,
+  onJustify,
   onRemove,
 }: {
   box: BoxMeta
@@ -1142,6 +1340,7 @@ function ImageBox({
   onGeomBegin: () => void
   onGeomCommit: () => void
   onReorder: (d: ReorderDir) => void
+  onJustify: (j: JustifyDir | null, x?: number) => void
   onRemove: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -1177,7 +1376,7 @@ function ImageBox({
     e.preventDefault()
     ref.current?.focus()
     onGeomBegin()
-    const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y }
+    const start = { px: e.clientX, py: e.clientY, x: dragStartX(box, ref.current), y: box.y }
     const el = e.currentTarget as HTMLElement
     el.setPointerCapture(e.pointerId)
     document.body.style.cursor = 'move'
@@ -1249,7 +1448,13 @@ function ImageBox({
     return (
       <div
         className="canvas-box canvas-image is-cropping"
-        style={{ left: box.x, top: box.y, width: fullW, height: fullH }}
+        style={{
+          left: box.x,
+          top: box.y,
+          width: fullW,
+          height: fullH,
+          transform: box.justify === 'right' ? 'translateX(-100%)' : undefined,
+        }}
         onPointerDown={(e) => e.stopPropagation()}
       >
         <img
@@ -1292,7 +1497,13 @@ function ImageBox({
     <div
       ref={ref}
       className={`canvas-box canvas-image${selected ? ' is-selected' : ''}`}
-      style={{ left: box.x, top: box.y, width: w, height: h }}
+      style={{
+        left: box.x,
+        top: box.y,
+        width: w,
+        height: h,
+        transform: box.justify === 'right' ? 'translateX(-100%)' : undefined,
+      }}
       tabIndex={0}
       onPointerDown={(e) => e.stopPropagation()}
       onFocus={() => setSelected(true)}
@@ -1357,6 +1568,8 @@ function ImageBox({
           }}
           onGeom={onGeom}
           onReorder={onReorder}
+          justify={box.justify}
+          onJustify={(j) => onJustify(j, j === null ? justifiedX(ref.current, box.justify) : undefined)}
           onRemove={onRemove}
           onCrop={() => {
             //close the menu session (commit its edits) before the crop, which
@@ -1384,6 +1597,8 @@ function ImageMenu({
   onClose,
   onGeom,
   onReorder,
+  justify,
+  onJustify,
   onRemove,
   onCrop,
   onResetCrop,
@@ -1397,6 +1612,8 @@ function ImageMenu({
   onClose: () => void
   onGeom: (patch: Partial<BoxMeta>) => void
   onReorder: (d: ReorderDir) => void
+  justify?: JustifyDir
+  onJustify: (j: JustifyDir | null) => void
   onRemove: () => void
   onCrop: () => void
   onResetCrop: () => void
@@ -1416,7 +1633,9 @@ function ImageMenu({
     onGeom({ w, h: Math.round(w / ratio) })
   }
 
-  return (
+  //portal to body so a transformed (right-justified) box ancestor doesn't
+  //become the containing block for this fixed menu and throw its position off
+  return createPortal(
     <div
       role="menu"
       className="fixed z-50 w-52 rounded-md border border-border bg-popover p-3 text-sm shadow-md"
@@ -1513,6 +1732,29 @@ function ImageMenu({
         ))}
       </div>
 
+      {/*horizontal pin: left edge to the canvas, right edge to the doc margin*/}
+      <div className="mb-1 mt-3 text-xs text-muted-foreground">Align</div>
+      <div className="flex gap-1">
+        {([
+          { dir: 'left', label: 'Justify left', Icon: AlignLeft },
+          { dir: 'right', label: 'Justify right', Icon: AlignRight },
+        ] as const).map(({ dir, label, Icon }) => (
+          <button
+            key={dir}
+            title={justify === dir ? `Unjustify ${dir}` : label}
+            onClick={() => {
+              onJustify(justify === dir ? null : dir)
+              onClose()
+            }}
+            className={`flex flex-1 items-center justify-center rounded border border-border px-2 py-1 outline-none hover:bg-accent${
+              justify === dir ? ' bg-accent' : ''
+            }`}
+          >
+            <Icon className="size-4 shrink-0" aria-hidden />
+          </button>
+        ))}
+      </div>
+
       <div className="mt-3 flex justify-start gap-1">
         <button
           onClick={() => onCrop()}
@@ -1546,7 +1788,8 @@ function ImageMenu({
         <Trash2 className="size-4 shrink-0" style={{ color: '#dc2626' }} aria-hidden />
         Delete image
       </button>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -1691,6 +1934,7 @@ function AttachmentBox({
   onGeomBegin,
   onGeomCommit,
   onReorder,
+  onJustify,
   onRemove,
   onInsertPrintout,
 }: {
@@ -1700,6 +1944,7 @@ function AttachmentBox({
   onGeomBegin: () => void
   onGeomCommit: () => void
   onReorder: (d: ReorderDir) => void
+  onJustify: (j: JustifyDir | null, x?: number) => void
   onRemove: () => void
   onInsertPrintout?: () => void
 }) {
@@ -1713,7 +1958,7 @@ function AttachmentBox({
     onGeomBegin()
     const el = e.currentTarget as HTMLElement
     el.setPointerCapture(e.pointerId)
-    const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y, moved: false }
+    const start = { px: e.clientX, py: e.clientY, x: dragStartX(box, ref.current), y: box.y, moved: false }
     function move(ev: PointerEvent) {
       const dx = ev.clientX - start.px
       const dy = ev.clientY - start.py
@@ -1740,7 +1985,11 @@ function AttachmentBox({
     <div
       ref={ref}
       className="canvas-box canvas-attachment"
-      style={{ left: box.x, top: box.y }}
+      style={{
+        left: box.x,
+        top: box.y,
+        transform: box.justify === 'right' ? 'translateX(-100%)' : undefined,
+      }}
       tabIndex={0}
       title={box.name ?? box.file}
       onPointerDown={startDrag}
@@ -1770,10 +2019,12 @@ function AttachmentBox({
         <AttachmentMenu
           menu={menu}
           canPrintout={!!onInsertPrintout}
+          justify={box.justify}
           onClose={() => setMenu(null)}
           onOpen={open}
           onInsertPrintout={() => onInsertPrintout?.()}
           onReorder={onReorder}
+          onJustify={(j) => onJustify(j, j === null ? justifiedX(ref.current, box.justify) : undefined)}
           onRemove={onRemove}
         />
       )}
@@ -1785,18 +2036,22 @@ function AttachmentBox({
 function AttachmentMenu({
   menu,
   canPrintout,
+  justify,
   onClose,
   onOpen,
   onInsertPrintout,
   onReorder,
+  onJustify,
   onRemove,
 }: {
   menu: { x: number; y: number }
   canPrintout: boolean
+  justify?: JustifyDir
   onClose: () => void
   onOpen: () => void
   onInsertPrintout: () => void
   onReorder: (d: ReorderDir) => void
+  onJustify: (j: JustifyDir | null) => void
   onRemove: () => void
 }) {
   useEffect(() => {
@@ -1810,7 +2065,9 @@ function AttachmentMenu({
   }, [onClose])
 
   const item = 'flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm outline-none hover:bg-accent'
-  return (
+  //portal to body so a transformed (right-justified) box ancestor doesn't
+  //become the containing block for this fixed menu and throw its position off
+  return createPortal(
     <div
       role="menu"
       className="fixed z-50 min-w-44 overflow-hidden rounded-md border border-border bg-popover py-1 shadow-md"
@@ -1830,6 +2087,8 @@ function AttachmentMenu({
       <div className="my-1 border-t border-border" />
       <LayerActions onReorder={onReorder} onClose={onClose} />
       <div className="my-1 border-t border-border" />
+      <JustifyActions justify={justify} onJustify={onJustify} onClose={onClose} />
+      <div className="my-1 border-t border-border" />
       <button
         role="menuitem"
         className={item}
@@ -1839,13 +2098,802 @@ function AttachmentMenu({
         <Trash2 className="size-4 shrink-0" style={{ color: '#dc2626' }} aria-hidden />
         Delete
       </button>
+    </div>,
+    document.body,
+  )
+}
+
+//a resizable window that scrolls a pdf inline. drag the title bar to move, drag
+//the bottom-right grip to resize the viewport freely (no aspect lock), the
+//browser's own pdf viewer handles scrolling through the pages
+function PdfBox({
+  box,
+  url,
+  onGeom,
+  onGeomBegin,
+  onGeomCommit,
+  onReorder,
+  onJustify,
+  onRemove,
+}: {
+  box: BoxMeta
+  url?: string
+  onGeom: (patch: Partial<BoxMeta>) => void
+  onGeomBegin: () => void
+  onGeomCommit: () => void
+  onReorder: (d: ReorderDir) => void
+  onJustify: (j: JustifyDir | null, x?: number) => void
+  onRemove: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  //the title bar, measured so height snaps account for it
+  const barRef = useRef<HTMLDivElement>(null)
+  //the slideshow page-number field, focused when either number is clicked
+  const pageInputRef = useRef<HTMLInputElement>(null)
+  //true once a bar drag actually moved, so a click that ends a drag doesn't also
+  //open the pdf
+  const movedRef = useRef(false)
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  //handles show while the window holds focus
+  const [selected, setSelected] = useState(false)
+  //zoom-shortcut hint: shows on hover, click pins it open
+  const [hintHover, setHintHover] = useState(false)
+  const [hintPin, setHintPin] = useState(false)
+  //the native pdf viewer is heavy, so don't spin one up until the window is
+  //near the viewport. once mounted it stays mounted (keeps scroll position),
+  //content-visibility then skips its paint while it's scrolled off-screen
+  const [live, setLive] = useState(false)
+  //while dragging/resizing the iframe must not eat pointer events or the gesture
+  //stalls the moment the cursor crosses into the pdf
+  const [interacting, setInteracting] = useState(false)
+  //slideshow paging state, only used in 'slides' mode. count comes from the
+  //loaded pdf, kept in a ref too so the keyboard stepper can clamp without a
+  //stale closure
+  const [slidePage, setSlidePage] = useState(1)
+  const [slideCount, setSlideCount] = useState(0)
+  const slideCountRef = useRef(0)
+  //thumbnail sidebar open, and the editable page-number field's draft text
+  const [sidebar, setSidebar] = useState(false)
+  const [pageInput, setPageInput] = useState('1')
+  //slideshow zoom: 1 fits the window, >1 overflows (pannable). the last rendered
+  //page's css size is kept so "fit one page" can size the window to it
+  const [slideZoom, setSlideZoom] = useState(1)
+  const pageSizeRef = useRef<{ w: number; h: number } | null>(null)
+  const slides = box.mode === 'slides'
+  const w = box.w ?? DEFAULT_PDF_W
+  const h = box.h ?? DEFAULT_PDF_W
+
+  function gotoPage(n: number) {
+    setSlidePage(Math.min(slideCountRef.current || 1, Math.max(1, n)))
+  }
+  function step(d: number) {
+    setSlidePage((p) => Math.min(slideCountRef.current || 1, Math.max(1, p + d)))
+  }
+  function onSlideCount(n: number) {
+    slideCountRef.current = n
+    setSlideCount(n)
+    setSlidePage((p) => Math.min(p, n || 1))
+  }
+  //keep the page field in sync when the page changes by arrow/key/thumbnail
+  useEffect(() => {
+    setPageInput(String(slidePage))
+  }, [slidePage])
+  //commit a typed page number: clamp into [1, count] (over the max just goes to
+  //the last page). always rewrite the field to the clamped value, even when the
+  //page didn't change, so an out-of-range entry never lingers in the input
+  function commitPage() {
+    const max = slideCountRef.current || 1
+    const n = parseInt(pageInput, 10)
+    const clamped = Number.isFinite(n) ? Math.min(max, Math.max(1, n)) : slidePage
+    gotoPage(clamped)
+    setPageInput(String(clamped))
+  }
+  function zoomBy(factor: number) {
+    setSlideZoom((z) => Math.min(6, Math.max(0.5, z * factor)))
+  }
+
+  function open() {
+    if (url) window.open(url, '_blank')
+  }
+
+  //mount the iframe once the window scrolls within ~one screen of the viewport
+  useEffect(() => {
+    const el = ref.current
+    if (!el || live) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setLive(true)
+          io.disconnect()
+        }
+      },
+      { rootMargin: '800px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [live])
+
+  //clicking empty canvas doesn't move focus off the window (or out of the
+  //iframe), so it stays selected. force it: a pointerdown outside the window
+  //drops the focus (and the iframe's) and hides the handles. clicks inside the
+  //iframe fire in its own document, not here, so reading the pdf is unaffected
+  useEffect(() => {
+    if (!selected) return
+    function onDown(e: PointerEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        ;(document.activeElement as HTMLElement | null)?.blur()
+        ref.current.blur()
+        setSelected(false)
+      }
+    }
+    window.addEventListener('pointerdown', onDown)
+    return () => window.removeEventListener('pointerdown', onDown)
+  }, [selected])
+
+  //drag the title bar to reposition, clamped to the positive canvas
+  function startDrag(e: React.PointerEvent) {
+    e.preventDefault()
+    //preventScroll: focusing the window must never jump the canvas
+    ref.current?.focus({ preventScroll: true })
+    onGeomBegin()
+    setInteracting(true)
+    movedRef.current = false
+    const start = { px: e.clientX, py: e.clientY, x: dragStartX(box, ref.current), y: box.y }
+    const el = e.currentTarget as HTMLElement
+    el.setPointerCapture(e.pointerId)
+    function move(ev: PointerEvent) {
+      if (Math.abs(ev.clientX - start.px) > 3 || Math.abs(ev.clientY - start.py) > 3) {
+        movedRef.current = true
+      }
+      onGeom({
+        x: Math.max(0, start.x + ev.clientX - start.px),
+        y: Math.max(0, start.y + ev.clientY - start.py),
+      })
+    }
+    function up(ev: PointerEvent) {
+      el.releasePointerCapture(ev.pointerId)
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', up)
+      setInteracting(false)
+      onGeomCommit()
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
+  }
+
+  //resize from any handle, like an image but free: each edge moves its own
+  //dimension, corners move both, the opposite side stays pinned via x/y. no
+  //aspect lock so the window can be any shape
+  function startResize(e: React.PointerEvent, dir: ResizeDir) {
+    e.preventDefault()
+    e.stopPropagation()
+    ref.current?.focus({ preventScroll: true })
+    onGeomBegin()
+    setInteracting(true)
+    const el = e.currentTarget as HTMLElement
+    el.setPointerCapture(e.pointerId)
+    const s = { px: e.clientX, py: e.clientY, x: box.x, y: box.y, w, h }
+    function move(ev: PointerEvent) {
+      const dx = ev.clientX - s.px
+      const dy = ev.clientY - s.py
+      let { x, y, w: nw, h: nh } = s
+      if (dir.includes('e')) nw = Math.max(MIN_PDF_W, s.w + dx)
+      if (dir.includes('w')) {
+        nw = Math.max(MIN_PDF_W, s.w - dx)
+        x = s.x + (s.w - nw)
+      }
+      if (dir.includes('s')) nh = Math.max(MIN_PDF_H, s.h + dy)
+      if (dir.includes('n')) {
+        nh = Math.max(MIN_PDF_H, s.h - dy)
+        y = s.y + (s.h - nh)
+      }
+      onGeom({ x, y, w: nw, h: nh })
+    }
+    function up(ev: PointerEvent) {
+      el.releasePointerCapture(ev.pointerId)
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', up)
+      setInteracting(false)
+      onGeomCommit()
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
+  }
+
+  //fit one page. in slides mode size the window to the current page at the
+  //current zoom (then zoom resets to 1, since the page now fills the window);
+  //in scroll mode snap the height to one page at the current width
+  function fitOnePage() {
+    const barH = barRef.current?.clientHeight ?? 32
+    if (slides) {
+      const ps = pageSizeRef.current
+      if (!ps) return
+      onGeomBegin()
+      onGeom({ w: Math.round(ps.w), h: Math.round(barH + ps.h) })
+      onGeomCommit()
+      setSlideZoom(1)
+      return
+    }
+    const ratio = box.aspect ?? w / h
+    onGeomBegin()
+    onGeom({ h: Math.round(barH + w / ratio) })
+    onGeomCommit()
+  }
+
+  //extend the bottom so the window is tall enough to show the whole pdf, every
+  //page fits to the window width so stack their scaled heights
+  async function fitWholePdf() {
+    if (!url) return
+    const data = await fetch(url).then((r) => r.arrayBuffer())
+    const { pageAspects } = await import('@/lib/pdfPrintout')
+    const aspects = await pageAspects(data)
+    if (!aspects.length) return
+    const barH = barRef.current?.clientHeight ?? 32
+    const total = aspects.reduce((sum, a) => sum + w / a, 0)
+    onGeomBegin()
+    onGeom({ h: Math.round(barH + total) })
+    onGeomCommit()
+  }
+
+  return (
+    <div
+      ref={ref}
+      className={`canvas-box canvas-pdf${selected ? ' is-selected' : ''}`}
+      style={{
+        left: box.x,
+        top: box.y,
+        width: w,
+        height: h,
+        transform: box.justify === 'right' ? 'translateX(-100%)' : undefined,
+      }}
+      tabIndex={0}
+      onFocus={() => setSelected(true)}
+      onBlur={() => setSelected(false)}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        ref.current?.focus({ preventScroll: true })
+        setMenu({ x: e.clientX, y: e.clientY })
+      }}
+      onKeyDown={(e) => {
+        //let the page-number field handle its own typing (incl. backspace, which
+        //would otherwise delete the whole window)
+        if ((e.target as HTMLElement).tagName === 'INPUT') return
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          e.preventDefault()
+          onRemove()
+        } else if (e.key === 'Escape') {
+          e.preventDefault()
+          ref.current?.blur()
+        } else if (slides && e.key === 'ArrowLeft') {
+          e.preventDefault()
+          step(-1)
+        } else if (slides && e.key === 'ArrowRight') {
+          e.preventDefault()
+          step(1)
+        }
+      }}
+    >
+      {/*body clips the bar/iframe to the rounded frame; the handles live outside
+         it on the unclipped outer box so they aren't cut off*/}
+      <div className="canvas-pdf-body">
+      <div
+        ref={barRef}
+        className="canvas-pdf-bar"
+        onPointerDown={startDrag}
+        //double-click anywhere on the bar also opens the pdf
+        onDoubleClick={() => {
+          if (!movedRef.current) open()
+        }}
+      >
+        {/*info button: hover or click reveals the shortcuts for the current
+           mode. its own pointer handlers stop the bar's drag/open firing*/}
+        <div
+          className="canvas-pdf-info"
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="canvas-pdf-info-btn"
+            aria-label="shortcuts"
+            onMouseEnter={() => setHintHover(true)}
+            onMouseLeave={() => setHintHover(false)}
+            onClick={() => setHintPin((p) => !p)}
+          >
+            <Info className="size-4" aria-hidden />
+          </button>
+          {(hintHover || hintPin) && (
+            <div className="canvas-pdf-hint" role="tooltip">
+              {slides ? (
+                <>
+                  <div className="canvas-pdf-hint-title">Slideshow</div>
+                  <div className="canvas-pdf-hint-row">
+                    <kbd>←</kbd> / <kbd>→</kbd> change page
+                  </div>
+                  <div className="canvas-pdf-hint-row">
+                    <kbd>⌘/Ctrl</kbd> + scroll to zoom
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="canvas-pdf-hint-title">Zoom the page</div>
+                  <div className="canvas-pdf-hint-row">
+                    <kbd>⌘/Ctrl</kbd> + scroll
+                  </div>
+                  <div className="canvas-pdf-hint-row">
+                    <kbd>⌘/Ctrl</kbd> + <kbd>+</kbd> / <kbd>−</kbd>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        {/*title: hover highlights, single click opens the pdf in a new tab.
+           skipped when the click actually ended a drag of the window*/}
+        <button
+          type="button"
+          className="canvas-pdf-title"
+          title={`${box.name ?? box.file} — open in new tab`}
+          //own the drag so pointer capture lands on the title (not the bar),
+          //otherwise the bar swallows the click and the pdf never opens
+          onPointerDown={(e) => {
+            e.stopPropagation()
+            startDrag(e)
+          }}
+          //open on the first click only (ignore the 2nd click of a double), and
+          //stop the bar's double-click handler from opening a second tab
+          onClick={(e) => {
+            if (!movedRef.current && e.detail <= 1) open()
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="canvas-attachment-name">{box.name ?? box.file}</span>
+        </button>
+        {/*thumbnail sidebar toggle (slideshow only), pushed to the right. own
+           pointer handlers stop the bar's drag/open from firing*/}
+        {slides && (
+          <button
+            type="button"
+            className="canvas-pdf-info-btn ml-auto"
+            aria-label={sidebar ? 'hide thumbnails' : 'show thumbnails'}
+            title={sidebar ? 'hide thumbnails' : 'show thumbnails'}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onClick={() => setSidebar((s) => !s)}
+          >
+            {sidebar ? (
+              <PanelRightClose className="size-4" aria-hidden />
+            ) : (
+              <PanelRightOpen className="size-4" aria-hidden />
+            )}
+          </button>
+        )}
+      </div>
+      {!live ? (
+        <div className="canvas-image-loading" />
+      ) : slides ? (
+        //slideshow: one page rendered at a time, paged by the arrows below
+        <PdfSlides
+          url={url}
+          page={slidePage}
+          zoom={slideZoom}
+          sidebar={sidebar}
+          onCount={onSlideCount}
+          onZoom={zoomBy}
+          onPageSize={(pw, ph) => (pageSizeRef.current = { w: pw, h: ph })}
+          onJump={gotoPage}
+        />
+      ) : url ? (
+        //hide the native viewer's chrome so it reads as an inline window. key by
+        //the url so a freshly resolved object url mounts a clean iframe: a bare
+        //src swap can leave the native pdf viewer stuck on a revoked blob (grey
+        //pages) after the strict-mode mount/revoke/remount cycle
+        <iframe
+          key={url}
+          src={`${url}#toolbar=0&navpanes=0`}
+          className="canvas-pdf-frame"
+          style={interacting ? { pointerEvents: 'none' } : undefined}
+          title={box.name ?? 'pdf'}
+        />
+      ) : (
+        <div className="canvas-image-loading" />
+      )}
+
+      {/*slideshow controls: a pill at the bottom center, arrows flanking the
+         editable page number so they never cover the page*/}
+      {slides && slideCount > 0 && (
+        <div className="canvas-pdf-controls" onPointerDown={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            tabIndex={-1}
+            className="canvas-pdf-nav"
+            aria-label="previous page"
+            disabled={slidePage <= 1}
+            //keep focus on the window so arrow-key paging keeps working
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => step(-1)}
+          >
+            <ChevronLeft className="size-4" aria-hidden />
+          </button>
+          <span
+            className="canvas-pdf-count"
+            //clicking either number jumps into the editable field
+            onClick={() => pageInputRef.current?.focus()}
+          >
+            <input
+              ref={pageInputRef}
+              className="canvas-pdf-page-input"
+              inputMode="numeric"
+              aria-label="page number"
+              value={pageInput}
+              onChange={(e) => setPageInput(e.target.value.replace(/[^0-9]/g, ''))}
+              onFocus={(e) => e.currentTarget.select()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  commitPage()
+                  e.currentTarget.blur()
+                } else if (e.key === 'Escape') {
+                  setPageInput(String(slidePage))
+                  e.currentTarget.blur()
+                }
+              }}
+              onBlur={commitPage}
+            />
+            <span className="canvas-pdf-count-total">/ {slideCount}</span>
+          </span>
+          <button
+            type="button"
+            tabIndex={-1}
+            className="canvas-pdf-nav"
+            aria-label="next page"
+            disabled={slidePage >= slideCount}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => step(1)}
+          >
+            <ChevronRight className="size-4" aria-hidden />
+          </button>
+        </div>
+      )}
+      </div>
+
+      {/*handles only while selected: drag any edge or corner to resize freely*/}
+      {selected &&
+        HANDLES.map((hd) => (
+          <div
+            key={hd.dir}
+            className={`canvas-image-handle absolute ${hd.cls}`}
+            style={{ cursor: hd.cursor }}
+            onPointerDown={(e) => startResize(e, hd.dir)}
+            aria-hidden
+          />
+        ))}
+
+      {menu && (
+        <PdfMenu
+          menu={menu}
+          slides={slides}
+          justify={box.justify}
+          onClose={() => setMenu(null)}
+          onOpen={open}
+          onToggleMode={() => onGeom({ mode: slides ? 'scroll' : 'slides' })}
+          onFitOnePage={fitOnePage}
+          onFitWholePdf={fitWholePdf}
+          onReorder={onReorder}
+          onJustify={(j) => onJustify(j, j === null ? justifiedX(ref.current, box.justify) : undefined)}
+          onRemove={onRemove}
+        />
+      )}
     </div>
   )
 }
 
+//slideshow renderer: loads the pdf once and paints the requested page to a
+//canvas, scaled to fit the window. only the current page is rendered, so it
+//stays light even for big decks
+function PdfSlides({
+  url,
+  page,
+  zoom,
+  sidebar,
+  onCount,
+  onZoom,
+  onPageSize,
+  onJump,
+}: {
+  url?: string
+  page: number
+  zoom: number
+  sidebar: boolean
+  onCount: (n: number) => void
+  onZoom: (factor: number) => void
+  onPageSize: (w: number, h: number) => void
+  onJump: (n: number) => void
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const pdfRef = useRef<PDFDocumentProxy | null>(null)
+  const [ready, setReady] = useState(false)
+  //page count, kept in state so the thumbnail list renders once loaded
+  const [count, setCount] = useState(0)
+  //the area available for the page, tracked so the page re-renders crisp on
+  //window resize
+  const [size, setSize] = useState({ w: 0, h: 0 })
+
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const measure = () => setSize({ w: el.clientWidth, h: el.clientHeight })
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    measure()
+    return () => ro.disconnect()
+  }, [])
+
+  //load the document (and tear it down on url change/unmount)
+  useEffect(() => {
+    if (!url) return
+    let cancelled = false
+    setReady(false)
+    ;(async () => {
+      const data = await fetch(url).then((r) => r.arrayBuffer())
+      const { openPdf } = await import('@/lib/pdfPrintout')
+      const pdf = await openPdf(data)
+      if (cancelled) {
+        pdf.destroy().catch(() => {})
+        return
+      }
+      pdfRef.current = pdf
+      onCount(pdf.numPages)
+      setCount(pdf.numPages)
+      setReady(true)
+    })()
+    return () => {
+      cancelled = true
+      const pdf = pdfRef.current
+      pdfRef.current = null
+      //destroy returns a promise that rejects if a render is mid-flight; swallow
+      //it so tearing down (e.g. switching back to scroll view) never crashes
+      pdf?.destroy().catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url])
+
+  //paint the current page whenever it, the size, or the zoom changes
+  useEffect(() => {
+    const pdf = pdfRef.current
+    const canvas = canvasRef.current
+    if (!pdf || !canvas || !ready || size.w < 2 || size.h < 2) return
+    let cancelled = false
+    let task: RenderTask | null = null
+    ;(async () => {
+      try {
+        const { renderPdfPage } = await import('@/lib/pdfPrintout')
+        if (cancelled) return
+        const res = await renderPdfPage(pdf, page, canvas, size.w, size.h, zoom)
+        task = res.task
+        onPageSize(res.cssW, res.cssH)
+        await task.promise
+      } catch {
+        //a superseded/cancelled render rejects, ignore it
+      }
+    })()
+    return () => {
+      cancelled = true
+      task?.cancel()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, ready, size.w, size.h, zoom])
+
+  //ctrl/cmd + wheel zooms. native listener so preventDefault works (react's
+  //onWheel is passive and can't stop the page from scrolling instead)
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return
+      e.preventDefault()
+      onZoom(e.deltaY < 0 ? 1.1 : 1 / 1.1)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  return (
+    <div className="canvas-pdf-stage">
+      <div ref={wrapRef} className="canvas-pdf-slide">
+        {ready ? (
+          <canvas ref={canvasRef} className="canvas-pdf-canvas" />
+        ) : (
+          <div className="canvas-image-loading" />
+        )}
+      </div>
+      {sidebar && ready && pdfRef.current && (
+        <div className="canvas-pdf-thumbs">
+          {Array.from({ length: count }, (_, i) => i + 1).map((n) => (
+            <PdfThumb
+              key={n}
+              pdf={pdfRef.current!}
+              num={n}
+              active={n === page}
+              onClick={() => onJump(n)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+//one thumbnail in the slideshow sidebar. renders its page only once it scrolls
+//into the sidebar viewport, keeping big decks cheap. the active page scrolls
+//itself into view
+function PdfThumb({
+  pdf,
+  num,
+  active,
+  onClick,
+}: {
+  pdf: PDFDocumentProxy
+  num: number
+  active: boolean
+  onClick: () => void
+}) {
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [shown, setShown] = useState(false)
+
+  useEffect(() => {
+    const el = btnRef.current
+    if (!el || shown) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setShown(true)
+          io.disconnect()
+        }
+      },
+      { root: el.parentElement, rootMargin: '300px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [shown])
+
+  useEffect(() => {
+    if (!shown) return
+    const canvas = canvasRef.current
+    if (!canvas) return
+    let task: RenderTask | null = null
+    ;(async () => {
+      try {
+        const { renderPdfPage } = await import('@/lib/pdfPrintout')
+        const res = await renderPdfPage(pdf, num, canvas, THUMB_W, THUMB_W * 6)
+        task = res.task
+        await task.promise
+      } catch {
+        //cancelled, ignore
+      }
+    })()
+    return () => task?.cancel()
+  }, [shown, pdf, num])
+
+  useEffect(() => {
+    if (active) btnRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [active])
+
+  return (
+    <button
+      ref={btnRef}
+      type="button"
+      tabIndex={-1}
+      className={`canvas-pdf-thumb${active ? ' is-active' : ''}`}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onClick}
+    >
+      {shown ? (
+        <canvas ref={canvasRef} className="canvas-pdf-thumb-canvas" />
+      ) : (
+        <div className="canvas-pdf-thumb-ph" />
+      )}
+      <span className="canvas-pdf-thumb-num">{num}</span>
+    </button>
+  )
+}
+
+//right-click menu for a pdf window
+function PdfMenu({
+  menu,
+  slides,
+  justify,
+  onClose,
+  onOpen,
+  onToggleMode,
+  onFitOnePage,
+  onFitWholePdf,
+  onReorder,
+  onJustify,
+  onRemove,
+}: {
+  menu: { x: number; y: number }
+  slides: boolean
+  justify?: JustifyDir
+  onClose: () => void
+  onOpen: () => void
+  onToggleMode: () => void
+  onFitOnePage: () => void
+  onFitWholePdf: () => void
+  onReorder: (d: ReorderDir) => void
+  onJustify: (j: JustifyDir | null) => void
+  onRemove: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('pointerdown', onClose)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', onClose)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  const item = 'flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm outline-none hover:bg-accent'
+  //portal to body so a transformed (right-justified) box ancestor doesn't
+  //become the containing block for this fixed menu and throw its position off
+  return createPortal(
+    <div
+      role="menu"
+      className="fixed z-50 min-w-48 overflow-hidden rounded-md border border-border bg-popover py-1 shadow-md"
+      style={{ left: menu.x, top: menu.y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <button role="menuitem" className={item} onClick={() => { onOpen(); onClose() }}>
+        <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Open
+      </button>
+      <button role="menuitem" className={item} onClick={() => { onToggleMode(); onClose() }}>
+        {slides ? (
+          <ScrollText className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        ) : (
+          <Presentation className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        )}
+        {slides ? 'Scrolling view' : 'Slideshow'}
+      </button>
+      <button role="menuitem" className={item} onClick={() => { onFitOnePage(); onClose() }}>
+        <RectangleHorizontal className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Fit one page
+      </button>
+      {/*continuous-scroll only: stack every page's height*/}
+      {!slides && (
+        <button role="menuitem" className={item} onClick={() => { onFitWholePdf(); onClose() }}>
+          <StretchVertical className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          Extend to whole PDF
+        </button>
+      )}
+      <div className="my-1 border-t border-border" />
+      <LayerActions onReorder={onReorder} onClose={onClose} />
+      <div className="my-1 border-t border-border" />
+      <JustifyActions justify={justify} onJustify={onJustify} onClose={onClose} />
+      <div className="my-1 border-t border-border" />
+      <button
+        role="menuitem"
+        className={item}
+        style={{ color: '#dc2626' }}
+        onClick={() => { onRemove(); onClose() }}
+      >
+        <Trash2 className="size-4 shrink-0" style={{ color: '#dc2626' }} aria-hidden />
+        Delete
+      </button>
+    </div>,
+    document.body,
+  )
+}
+
 //a single draggable, editable text container
-function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBegin, onGeomCommit, onReorder, onRemove }: BoxProps) {
+function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBegin, onGeomCommit, onReorder, onJustify, onRemove }: BoxProps) {
   const body = useRef<HTMLDivElement>(null)
+  //the box root, measured so unjustify can leave it where it currently sits
+  const rootRef = useRef<HTMLDivElement>(null)
   //right-click menu position, null when closed
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   //grey line on hover/focus is a box-shadow ring not a border: tailwind preflight
@@ -1883,7 +2931,7 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBeg
     if (!hasContent()) return
     e.preventDefault()
     onGeomBegin()
-    const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y }
+    const start = { px: e.clientX, py: e.clientY, x: dragStartX(box, rootRef.current), y: box.y }
     const el = e.currentTarget as HTMLElement
     el.setPointerCapture(e.pointerId)
     //pin the 4-way move cursor for the whole drag, not just over the frame
@@ -1935,14 +2983,18 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBeg
 
   return (
     <div
+      ref={rootRef}
       className="canvas-box group"
       //no stored width: grow with the text up to BOX_MAX_W then wrap. once
       //resized, use the fixed width the user dragged to
-      style={
-        box.w
-          ? { left: box.x, top: box.y, width: box.w }
-          : { left: box.x, top: box.y, width: 'max-content', maxWidth: BOX_MAX_W }
-      }
+      style={{
+        left: box.x,
+        top: box.y,
+        //no stored width grows with text up to BOX_MAX_W; a stored width is fixed
+        ...(box.w ? { width: box.w } : { width: 'max-content', maxWidth: BOX_MAX_W }),
+        //right-justified: pin the right edge to the marker regardless of width
+        transform: box.justify === 'right' ? 'translateX(-100%)' : undefined,
+      }}
       //stop canvas-create clicks from firing under the box
       onPointerDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => {
@@ -1982,8 +3034,10 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBeg
       {menu && (
         <BoxMenu
           menu={menu}
+          justify={box.justify}
           onClose={() => setMenu(null)}
           onReorder={onReorder}
+          onJustify={(j) => onJustify(j, j === null ? justifiedX(rootRef.current, box.justify) : undefined)}
           onRemove={onRemove}
         />
       )}
@@ -1994,13 +3048,17 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBeg
 //right-click menu for a text container: stacking controls plus delete
 function BoxMenu({
   menu,
+  justify,
   onClose,
   onReorder,
+  onJustify,
   onRemove,
 }: {
   menu: { x: number; y: number }
+  justify?: JustifyDir
   onClose: () => void
   onReorder: (d: ReorderDir) => void
+  onJustify: (j: JustifyDir | null) => void
   onRemove: () => void
 }) {
   useEffect(() => {
@@ -2013,7 +3071,9 @@ function BoxMenu({
     }
   }, [onClose])
 
-  return (
+  //portal to body so a transformed (right-justified) box ancestor doesn't
+  //become the containing block for this fixed menu and throw its position off
+  return createPortal(
     <div
       role="menu"
       className="fixed z-50 min-w-44 overflow-hidden rounded-md border border-border bg-popover py-1 shadow-md"
@@ -2034,6 +3094,7 @@ function BoxMenu({
         <Trash2 className="size-4 shrink-0" style={{ color: '#dc2626' }} aria-hidden />
         Delete
       </button>
-    </div>
+    </div>,
+    document.body,
   )
 }

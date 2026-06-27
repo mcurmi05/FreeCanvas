@@ -15,8 +15,9 @@ export interface BoxMeta {
   //undefined an image sizes its height from its width and aspect ratio
   h?: number
   html: string
-  //what the box holds, defaults to text. omitted on disk for clean text files
-  kind?: 'text' | 'image' | 'attachment'
+  //what the box holds, defaults to text. omitted on disk for clean text files.
+  //'pdf' is a resizable window scrolling the original pdf inline
+  kind?: 'text' | 'image' | 'attachment' | 'pdf'
   //filename inside the page's attachments/ folder, image and attachment boxes
   file?: string
   //mime of the stored file, drives image vs attachment handling on reload
@@ -27,6 +28,12 @@ export interface BoxMeta {
   aspect?: number
   //corner rounding in px, image boxes only
   radius?: number
+  //pdf window view: 'scroll' (native continuous viewer) or 'slides' (one page
+  //at a time with arrows). absent means scroll
+  mode?: 'scroll' | 'slides'
+  //horizontal pin: 'left' sticks to the canvas left edge, 'right' to the doc
+  //width marker (and follows it). absent means free positioning via x
+  justify?: 'left' | 'right'
   //visible crop region as fractions of the original image (x,y top-left, w,h
   //size, all 0..1). absent means the whole image is shown
   crop?: { x: number; y: number; w: number; h: number }
@@ -81,9 +88,16 @@ export function parsePage(content: string): ParsedPage {
     const h = parseFloat(el.style.height)
     const kindAttr = el.getAttribute('data-kind')
     const kind =
-      kindAttr === 'image' || kindAttr === 'attachment' ? kindAttr : undefined
+      kindAttr === 'image' || kindAttr === 'attachment' || kindAttr === 'pdf'
+        ? kindAttr
+        : undefined
     const aspect = parseFloat(el.getAttribute('data-aspect') ?? '')
     const radius = parseFloat(el.getAttribute('data-radius') ?? '')
+    const modeAttr = el.getAttribute('data-mode')
+    const mode = modeAttr === 'slides' ? 'slides' : undefined
+    const justifyAttr = el.getAttribute('data-justify')
+    const justify =
+      justifyAttr === 'left' || justifyAttr === 'right' ? justifyAttr : undefined
     //crop is four comma-separated fractions: x,y,w,h
     const cropParts = (el.getAttribute('data-crop') ?? '').split(',').map(Number)
     const crop =
@@ -105,6 +119,8 @@ export function parsePage(content: string): ParsedPage {
       name: el.getAttribute('data-name') || undefined,
       aspect: isNaN(aspect) ? undefined : aspect,
       radius: isNaN(radius) ? undefined : radius,
+      mode,
+      justify,
       crop,
     })
   })
@@ -147,6 +163,7 @@ export function serializePage(
             (b.name ? ` data-name="${escapeAttr(b.name)}"` : '') +
             (b.aspect ? ` data-aspect="${b.aspect}"` : '') +
             (b.radius ? ` data-radius="${Math.round(b.radius)}"` : '') +
+            (b.mode === 'slides' ? ` data-mode="slides"` : '') +
             (b.crop
               ? ` data-crop="${[b.crop.x, b.crop.y, b.crop.w, b.crop.h]
                   .map((n) => +n.toFixed(4))
@@ -155,9 +172,11 @@ export function serializePage(
           : ''
       //media boxes hold no inner html, only text boxes carry content
       const inner = b.kind && b.kind !== 'text' ? '' : b.html
+      //justify applies to every kind, so it lives outside the media block
+      const justifyAttr = b.justify ? ` data-justify="${b.justify}"` : ''
       return `<div data-canvas-box style="left:${Math.round(b.x)}px;top:${Math.round(
         b.y,
-      )}px${w}${h}"${media}>${inner}</div>`
+      )}px${w}${h}"${media}${justifyAttr}>${inner}</div>`
     })
     .join('')
   return `<div data-canvas-doc${createdAttr}${hiddenAttr}${widthAttr}>${docHtml}</div>${boxHtml}`

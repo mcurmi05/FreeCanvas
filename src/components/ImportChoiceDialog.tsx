@@ -1,4 +1,4 @@
-import { FileText, Paperclip } from 'lucide-react'
+import { FileText, Paperclip, ScrollText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -8,8 +8,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 
-//how a non-image file should land on the page
-export type ImportChoice = 'attachment' | 'printout'
+//how a non-image file should land on the page. 'pdfwindow' is a resizable
+//viewport that scrolls the pdf inline, the rest as before
+export type ImportChoice = 'attachment' | 'printout' | 'pdfwindow'
 
 interface Props {
   //the file being imported, shown in the prompt. null keeps the dialog closed
@@ -60,6 +61,22 @@ export function ImportChoiceDialog({ fileName, canPrintout, onChoose }: Props) {
                 {canPrintout
                   ? "Lay the file's pages out as images on the canvas"
                   : 'Only PDFs can be laid out as a printout'}
+              </span>
+            </span>
+          </Button>
+          <Button
+            variant="outline"
+            className="h-auto justify-start gap-3 py-3 text-left"
+            disabled={!canPrintout}
+            onClick={() => onChoose('pdfwindow')}
+          >
+            <ScrollText className="size-5 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="flex flex-col">
+              <span className="font-medium">PDF window</span>
+              <span className="text-xs text-muted-foreground">
+                {canPrintout
+                  ? 'A single-page-sized window you scroll and resize freely'
+                  : 'Only PDFs can be opened in a window'}
               </span>
             </span>
           </Button>
