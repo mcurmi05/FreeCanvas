@@ -7,7 +7,17 @@ import {
   type CSSProperties,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, Crop, EyeOff, ImagePlus, Trash2 } from 'lucide-react'
+import {
+  ArrowDown,
+  ArrowDownToLine,
+  ArrowUp,
+  ArrowUpToLine,
+  Check,
+  Crop,
+  EyeOff,
+  ImagePlus,
+  Trash2,
+} from 'lucide-react'
 import { PageEditor, type EditorCan } from '@/components/PageEditor'
 import { attachmentUrl, deleteAttachment, readAttachment, writeAttachment } from '@/lib/attachments'
 import { importAttachment, importImage, isImage, isPdf } from '@/lib/importFiles'
@@ -177,6 +187,8 @@ export function PageCanvas({
   type UndoAction =
     | { type: 'delete'; box: BoxMeta; html?: string }
     | { type: 'geom'; id: string; before: Partial<BoxMeta>; after: Partial<BoxMeta> }
+    //a stacking change: the box moved from one index in the paint order to another
+    | { type: 'order'; id: string; from: number; to: number }
   const undoStack = useRef<UndoAction[]>([])
   const redoStack = useRef<UndoAction[]>([])
   const UNDO_CAP = 50
@@ -490,14 +502,47 @@ export function PageCanvas({
     scheduleSave()
   }
 
-  //roll the most recent action back: re-add a deleted box, or restore the
-  //pre-gesture geometry of a moved/resized one
+  //move a box to a new index in the paint order, keeping the ref in sync
+  function applyMove(id: string, index: number) {
+    const arr = boxesRef.current.slice()
+    const i = arr.findIndex((b) => b.id === id)
+    if (i < 0) return
+    const [box] = arr.splice(i, 1)
+    arr.splice(index, 0, box)
+    boxesRef.current = arr
+    setBoxes(arr)
+  }
+
+  //change a box's stacking: later in the array paints on top (the boxes share one
+  //overlay with no per-box z-index, so array order is paint order)
+  function reorderBox(id: string, dir: 'front' | 'back' | 'forward' | 'backward') {
+    const arr = boxesRef.current
+    const i = arr.findIndex((b) => b.id === id)
+    if (i < 0) return
+    const to =
+      dir === 'front'
+        ? arr.length - 1
+        : dir === 'back'
+          ? 0
+          : dir === 'forward'
+            ? Math.min(arr.length - 1, i + 1)
+            : Math.max(0, i - 1)
+    if (to === i) return
+    applyMove(id, to)
+    pushUndo({ type: 'order', id, from: i, to })
+    scheduleSave()
+  }
+
+  //roll the most recent action back: re-add a deleted box, restore the
+  //pre-gesture geometry of a moved/resized one, or undo a stacking change
   function undo() {
     const action = undoStack.current.pop()
     if (!action) return
     if (action.type === 'delete') {
       if (action.html !== undefined) boxHtml.current[action.box.id] = action.html
       setBoxes((bs) => [...bs, action.box])
+    } else if (action.type === 'order') {
+      applyMove(action.id, action.from)
     } else {
       updateBox(action.id, action.before)
     }
@@ -512,6 +557,8 @@ export function PageCanvas({
     if (!action) return
     if (action.type === 'delete') {
       setBoxes((bs) => bs.filter((b) => b.id !== action.box.id))
+    } else if (action.type === 'order') {
+      applyMove(action.id, action.to)
     } else {
       updateBox(action.id, action.after)
     }
@@ -916,6 +963,7 @@ export function PageCanvas({
                     onGeom={(patch) => updateBox(b.id, patch)}
                     onGeomBegin={() => beginGeom(b.id)}
                     onGeomCommit={() => commitGeom(b.id)}
+                    onReorder={(d) => reorderBox(b.id, d)}
                     onRemove={() => removeBox(b.id)}
                   />
                 ) : b.kind === 'attachment' ? (
@@ -926,6 +974,7 @@ export function PageCanvas({
                     onMove={(x, y) => updateBox(b.id, { x, y })}
                     onGeomBegin={() => beginGeom(b.id)}
                     onGeomCommit={() => commitGeom(b.id)}
+                    onReorder={(d) => reorderBox(b.id, d)}
                     onRemove={() => removeBox(b.id)}
                     onInsertPrintout={
                       isPdf(b.mime, b.name) ? () => insertPrintout(b) : undefined
@@ -942,6 +991,7 @@ export function PageCanvas({
                     onResize={(w) => updateBox(b.id, { w })}
                     onGeomBegin={() => beginGeom(b.id)}
                     onGeomCommit={() => commitGeom(b.id)}
+                    onReorder={(d) => reorderBox(b.id, d)}
                     onRemove={() => removeBox(b.id)}
                   />
                 ),
@@ -1004,6 +1054,45 @@ function TitleMenu({
   )
 }
 
+//the four stacking moves every box's right-click menu offers
+type ReorderDir = 'front' | 'back' | 'forward' | 'backward'
+const LAYER_ACTIONS: { dir: ReorderDir; label: string; Icon: typeof ArrowUp }[] = [
+  { dir: 'front', label: 'Bring to front', Icon: ArrowUpToLine },
+  { dir: 'forward', label: 'Bring forward', Icon: ArrowUp },
+  { dir: 'backward', label: 'Send backward', Icon: ArrowDown },
+  { dir: 'back', label: 'Send to back', Icon: ArrowDownToLine },
+]
+
+//stacking controls rendered as list rows, shared by the attachment and text-box
+//right-click menus
+function LayerActions({
+  onReorder,
+  onClose,
+}: {
+  onReorder: (d: ReorderDir) => void
+  onClose: () => void
+}) {
+  const item = 'flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm outline-none hover:bg-accent'
+  return (
+    <>
+      {LAYER_ACTIONS.map(({ dir, label, Icon }) => (
+        <button
+          key={dir}
+          role="menuitem"
+          className={item}
+          onClick={() => {
+            onReorder(dir)
+            onClose()
+          }}
+        >
+          <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          {label}
+        </button>
+      ))}
+    </>
+  )
+}
+
 interface BoxProps {
   box: BoxMeta
   autoFocus: boolean
@@ -1014,6 +1103,7 @@ interface BoxProps {
   //bracket a move/resize gesture so it lands as a single undo step
   onGeomBegin: () => void
   onGeomCommit: () => void
+  onReorder: (d: ReorderDir) => void
   onRemove: () => void
 }
 
@@ -1041,6 +1131,7 @@ function ImageBox({
   onGeom,
   onGeomBegin,
   onGeomCommit,
+  onReorder,
   onRemove,
 }: {
   box: BoxMeta
@@ -1050,6 +1141,7 @@ function ImageBox({
   //single undo step
   onGeomBegin: () => void
   onGeomCommit: () => void
+  onReorder: (d: ReorderDir) => void
   onRemove: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -1264,6 +1356,7 @@ function ImageBox({
             onGeomCommit()
           }}
           onGeom={onGeom}
+          onReorder={onReorder}
           onRemove={onRemove}
           onCrop={() => {
             //close the menu session (commit its edits) before the crop, which
@@ -1290,6 +1383,7 @@ function ImageMenu({
   cropped,
   onClose,
   onGeom,
+  onReorder,
   onRemove,
   onCrop,
   onResetCrop,
@@ -1302,6 +1396,7 @@ function ImageMenu({
   cropped: boolean
   onClose: () => void
   onGeom: (patch: Partial<BoxMeta>) => void
+  onReorder: (d: ReorderDir) => void
   onRemove: () => void
   onCrop: () => void
   onResetCrop: () => void
@@ -1398,6 +1493,25 @@ function ImageMenu({
           onChange={(e) => onGeom({ radius: parseInt(e.target.value, 10) })}
         />
       </label>
+
+      {/*stacking: which boxes paint over which. a row of icon buttons keeps the
+         panel compact*/}
+      <div className="mb-1 mt-3 text-xs text-muted-foreground">Arrange</div>
+      <div className="flex gap-1">
+        {LAYER_ACTIONS.map(({ dir, label, Icon }) => (
+          <button
+            key={dir}
+            title={label}
+            onClick={() => {
+              onReorder(dir)
+              onClose()
+            }}
+            className="flex flex-1 items-center justify-center rounded border border-border px-2 py-1 outline-none hover:bg-accent"
+          >
+            <Icon className="size-4 shrink-0" aria-hidden />
+          </button>
+        ))}
+      </div>
 
       <div className="mt-3 flex justify-start gap-1">
         <button
@@ -1576,6 +1690,7 @@ function AttachmentBox({
   onMove,
   onGeomBegin,
   onGeomCommit,
+  onReorder,
   onRemove,
   onInsertPrintout,
 }: {
@@ -1584,6 +1699,7 @@ function AttachmentBox({
   onMove: (x: number, y: number) => void
   onGeomBegin: () => void
   onGeomCommit: () => void
+  onReorder: (d: ReorderDir) => void
   onRemove: () => void
   onInsertPrintout?: () => void
 }) {
@@ -1657,6 +1773,7 @@ function AttachmentBox({
           onClose={() => setMenu(null)}
           onOpen={open}
           onInsertPrintout={() => onInsertPrintout?.()}
+          onReorder={onReorder}
           onRemove={onRemove}
         />
       )}
@@ -1671,6 +1788,7 @@ function AttachmentMenu({
   onClose,
   onOpen,
   onInsertPrintout,
+  onReorder,
   onRemove,
 }: {
   menu: { x: number; y: number }
@@ -1678,6 +1796,7 @@ function AttachmentMenu({
   onClose: () => void
   onOpen: () => void
   onInsertPrintout: () => void
+  onReorder: (d: ReorderDir) => void
   onRemove: () => void
 }) {
   useEffect(() => {
@@ -1708,6 +1827,9 @@ function AttachmentMenu({
           Insert as printout
         </button>
       )}
+      <div className="my-1 border-t border-border" />
+      <LayerActions onReorder={onReorder} onClose={onClose} />
+      <div className="my-1 border-t border-border" />
       <button
         role="menuitem"
         className={item}
@@ -1722,8 +1844,10 @@ function AttachmentMenu({
 }
 
 //a single draggable, editable text container
-function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBegin, onGeomCommit, onRemove }: BoxProps) {
+function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBegin, onGeomCommit, onReorder, onRemove }: BoxProps) {
   const body = useRef<HTMLDivElement>(null)
+  //right-click menu position, null when closed
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   //grey line on hover/focus is a box-shadow ring not a border: tailwind preflight
   //resets border-width to 0 on every element so a border colour never paints,
   //but box-shadow is untouched. driven by css :hover/:focus-within in global.css
@@ -1821,6 +1945,10 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBeg
       }
       //stop canvas-create clicks from firing under the box
       onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        setMenu({ x: e.clientX, y: e.clientY })
+      }}
     >
       {/*the frame is the drag handle, grab it to move. the inner text stops
          propagation so clicking it edits instead. grey ring on hover/focus
@@ -1850,6 +1978,62 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBeg
         className="absolute -right-1 top-0 h-full w-2 cursor-ew-resize opacity-0 group-hover:opacity-100"
         aria-hidden
       />
+
+      {menu && (
+        <BoxMenu
+          menu={menu}
+          onClose={() => setMenu(null)}
+          onReorder={onReorder}
+          onRemove={onRemove}
+        />
+      )}
+    </div>
+  )
+}
+
+//right-click menu for a text container: stacking controls plus delete
+function BoxMenu({
+  menu,
+  onClose,
+  onReorder,
+  onRemove,
+}: {
+  menu: { x: number; y: number }
+  onClose: () => void
+  onReorder: (d: ReorderDir) => void
+  onRemove: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('pointerdown', onClose)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', onClose)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  return (
+    <div
+      role="menu"
+      className="fixed z-50 min-w-44 overflow-hidden rounded-md border border-border bg-popover py-1 shadow-md"
+      style={{ left: menu.x, top: menu.y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <LayerActions onReorder={onReorder} onClose={onClose} />
+      <div className="my-1 border-t border-border" />
+      <button
+        role="menuitem"
+        className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm outline-none hover:bg-accent"
+        style={{ color: '#dc2626' }}
+        onClick={() => {
+          onRemove()
+          onClose()
+        }}
+      >
+        <Trash2 className="size-4 shrink-0" style={{ color: '#dc2626' }} aria-hidden />
+        Delete
+      </button>
     </div>
   )
 }

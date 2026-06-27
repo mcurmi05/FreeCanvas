@@ -322,7 +322,9 @@
   width: 100%;
   padding: 8px 10px;
   border-radius: 4px;
-  background: #fff;
+  /*transparent at rest so a box laid over an image shows the image, not a white
+    square. a white backing comes back on hover/focus for comfortable editing*/
+  background: transparent;
   cursor: move;
   transition: box-shadow 0.12s ease;
 }
@@ -353,6 +355,13 @@
 .canvas-box:has(.canvas-box-text:not(:empty)):hover .canvas-box-frame,
 .canvas-box:has(.canvas-box-text:not(:empty)):focus-within .canvas-box-frame {
   box-shadow: 0 0 0 2px #9ca3af;
+}
+
+/*white backing while hovering or editing so text stays readable over an image,
+  matched to the ring above. at rest the frame is transparent (see above)*/
+.canvas-box:hover .canvas-box-frame,
+.canvas-box:focus-within .canvas-box-frame {
+  background: #fff;
 }
 
 /*image boxes: the whole frame is the drag handle, the image fills the box so
