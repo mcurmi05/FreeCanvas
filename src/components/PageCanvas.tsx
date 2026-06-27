@@ -8,7 +8,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, Crop, EyeOff, ImagePlus, Trash2 } from 'lucide-react'
-import { PageEditor } from '@/components/PageEditor'
+import { PageEditor, type EditorCan } from '@/components/PageEditor'
 import { attachmentUrl, deleteAttachment, readAttachment, writeAttachment } from '@/lib/attachments'
 import { importAttachment, importImage, isImage, isPdf } from '@/lib/importFiles'
 import { ImportChoiceDialog, type ImportChoice } from '@/components/ImportChoiceDialog'
@@ -169,19 +169,30 @@ export function PageCanvas({
     }
   }, [boxes, pageDir])
 
-  //undo/redo for box deletions. each entry holds the removed box (and its text
-  //html) so it can be restored. a media file is only erased from disk once its
-  //deletion drops off the undo history, so undo can always bring it back
-  const undoStack = useRef<{ box: BoxMeta; html?: string }[]>([])
-  const redoStack = useRef<{ box: BoxMeta; html?: string }[]>([])
+  //undo/redo for canvas boxes. a delete entry holds the removed box (and its
+  //text html) so it can be restored; a geom entry holds the box's geometry
+  //before and after a move/resize/crop so it can be rolled either way. a media
+  //file is only erased from disk once its deletion drops off the undo history,
+  //so undo can always bring the box (and its image) back
+  type UndoAction =
+    | { type: 'delete'; box: BoxMeta; html?: string }
+    | { type: 'geom'; id: string; before: Partial<BoxMeta>; after: Partial<BoxMeta> }
+  const undoStack = useRef<UndoAction[]>([])
+  const redoStack = useRef<UndoAction[]>([])
   const UNDO_CAP = 50
   //latest pageDir for the finalizer, which may run from a once-bound listener
   const pageDirRef = useRef(pageDir)
   pageDirRef.current = pageDir
 
+  //the live document editor, polled to learn whether the document still has its
+  //own undo/redo, so the toolbar buttons reflect doc + canvas availability
+  const editorCan = useRef<EditorCan | null>(null)
+
   //a deletion is now permanent: drop the box's text and, if no remaining box
-  //still uses its file, revoke the url and erase the file from attachments
-  function finalizeDelete(action: { box: BoxMeta; html?: string }) {
+  //still uses its file, revoke the url and erase the file from attachments. only
+  //delete entries touch disk, geom entries leave nothing to clean up
+  function finalizeDelete(action: UndoAction) {
+    if (action.type !== 'delete') return
     delete boxHtml.current[action.box.id]
     const file = action.box.file
     if (!file || boxesRef.current.some((b) => b.file === file)) return
@@ -191,6 +202,75 @@ export function PageCanvas({
       mediaUrls.current.delete(file)
     }
     if (pageDirRef.current) void deleteAttachment(pageDirRef.current, file)
+  }
+
+  //push an action and clear redo, evicting (and finalizing) the oldest past the cap
+  function pushUndo(action: UndoAction) {
+    undoStack.current.push(action)
+    redoStack.current = []
+    while (undoStack.current.length > UNDO_CAP) {
+      finalizeDelete(undoStack.current.shift()!)
+    }
+    syncUndoButtons()
+  }
+
+  //geometry fields an undo entry rolls back, snapshotted before/after a gesture
+  const GEOM_KEYS = ['x', 'y', 'w', 'h', 'crop', 'radius'] as const
+  function snapshotGeom(id: string): Partial<BoxMeta> {
+    const b = boxesRef.current.find((x) => x.id === id)
+    const s: Partial<BoxMeta> = {}
+    if (b) for (const k of GEOM_KEYS) (s as Record<string, unknown>)[k] = b[k]
+    return s
+  }
+  //the geometry captured when a move/resize/crop gesture (or image menu) began,
+  //committed as one undo entry on release so a drag is a single undo step
+  const geomBefore = useRef<{ id: string; before: Partial<BoxMeta> } | null>(null)
+  function beginGeom(id: string) {
+    geomBefore.current = { id, before: snapshotGeom(id) }
+  }
+  function commitGeom(id: string) {
+    const pending = geomBefore.current
+    geomBefore.current = null
+    if (!pending || pending.id !== id) return
+    //the box was deleted during the session (its own undo entry covers that)
+    if (!boxesRef.current.some((b) => b.id === id)) return
+    const after = snapshotGeom(id)
+    //nothing actually moved, skip the empty entry
+    if (GEOM_KEYS.every((k) => pending.before[k] === after[k])) return
+    pushUndo({ type: 'geom', id, before: pending.before, after })
+  }
+
+  //tiptap only toggles its toolbar undo/redo from the document's own history, so
+  //it can't see canvas edits (resize, delete). drive each button from the true
+  //combined state: enabled when either our stack or the document has something
+  //to roll, disabled (and greyed) otherwise. computed from ground truth so a
+  //write only happens when the value actually differs, no flicker, no loop
+  function buttonDisabled(canEditor: boolean, canCanvas: boolean) {
+    return !(canCanvas || canEditor)
+  }
+  function syncUndoButtons() {
+    const el = wrapper.current
+    if (!el) return
+    const u = el.querySelector('.lucide-undo2')?.closest('button') as HTMLButtonElement | null
+    const r = el.querySelector('.lucide-redo2')?.closest('button') as HTMLButtonElement | null
+    //the editor view may be torn down mid page-switch, can() throws then
+    let canUndo = false
+    let canRedo = false
+    try {
+      const ed = editorCan.current
+      canUndo = !!ed?.can().undo()
+      canRedo = !!ed?.can().redo()
+    } catch {
+      // editor gone, fall back to canvas-only availability
+    }
+    if (u) {
+      const want = buttonDisabled(canUndo, undoStack.current.length > 0)
+      if (u.disabled !== want) u.disabled = want
+    }
+    if (r) {
+      const want = buttonDisabled(canRedo, redoStack.current.length > 0)
+      if (r.disabled !== want) r.disabled = want
+    }
   }
 
   //on unmount, every still-pending deletion becomes permanent (the page is
@@ -319,6 +399,40 @@ export function PageCanvas({
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  //route the tiptap toolbar's undo/redo arrow buttons through the canvas stack.
+  //caught in capture so a pending canvas action runs and the editor's own undo
+  //is suppressed (stopPropagation keeps the click from reaching tiptap's
+  //handler); once our stack drains the click falls through to the editor as
+  //normal. the buttons are matched by their lucide undo/redo icon
+  useEffect(() => {
+    const el = wrapper.current
+    if (!el) return
+    function onClick(e: MouseEvent) {
+      const btn = (e.target as HTMLElement).closest?.('button')
+      if (!btn || !el!.contains(btn)) return
+      const isRedo = btn.querySelector('.lucide-redo2')
+      const isUndo = btn.querySelector('.lucide-undo2')
+      if (!isUndo && !isRedo) return
+      if (isRedo) {
+        if (!redoStack.current.length) return
+      } else if (!undoStack.current.length) return
+      e.preventDefault()
+      e.stopPropagation()
+      ;(isRedo ? redoRef : undoRef).current()
+    }
+    el.addEventListener('click', onClick, true)
+    //tiptap disables the buttons when the document has no history, and may
+    //re-disable them on its own re-renders. re-enable them whenever the canvas
+    //stack still has something to roll
+    const obs = new MutationObserver(() => syncUndoButtons())
+    obs.observe(el, { childList: true, subtree: true, attributeFilter: ['disabled'] })
+    return () => {
+      el.removeEventListener('click', onClick, true)
+      obs.disconnect()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   //mousedown on the blank canvas (not the document, not a box) creates a text
   //box, mousedown preventDefault keeps focus off the editor so the box keeps it
   useEffect(() => {
@@ -357,8 +471,12 @@ export function PageCanvas({
   //which box should grab focus right after it mounts
   const [focusId, setFocusId] = useState<string | null>(null)
 
+  //live geometry update, keep the ref in sync so a commit right after a gesture
+  //reads the final geometry. does not record undo, the gesture's begin/commit
+  //pair does that once on release
   function updateBox(id: string, patch: Partial<BoxMeta>) {
-    setBoxes((bs) => bs.map((b) => (b.id === id ? { ...b, ...patch } : b)))
+    boxesRef.current = boxesRef.current.map((b) => (b.id === id ? { ...b, ...patch } : b))
+    setBoxes(boxesRef.current)
     scheduleSave()
   }
 
@@ -366,39 +484,46 @@ export function PageCanvas({
     const box = boxesRef.current.find((b) => b.id === id)
     if (!box) return
     //record the deletion for undo, keep the file and url around in case it comes
-    //back. evict the oldest action past the cap and make that one permanent
-    undoStack.current.push({ box: { ...box }, html: boxHtml.current[id] })
-    redoStack.current = []
-    while (undoStack.current.length > UNDO_CAP) {
-      finalizeDelete(undoStack.current.shift()!)
-    }
+    //back. pushUndo evicts the oldest action past the cap and makes it permanent
+    pushUndo({ type: 'delete', box: { ...box }, html: boxHtml.current[id] })
     setBoxes((bs) => bs.filter((b) => b.id !== id))
     scheduleSave()
   }
 
-  //bring back the most recently deleted box
-  function undoDelete() {
+  //roll the most recent action back: re-add a deleted box, or restore the
+  //pre-gesture geometry of a moved/resized one
+  function undo() {
     const action = undoStack.current.pop()
     if (!action) return
-    if (action.html !== undefined) boxHtml.current[action.box.id] = action.html
-    setBoxes((bs) => [...bs, action.box])
+    if (action.type === 'delete') {
+      if (action.html !== undefined) boxHtml.current[action.box.id] = action.html
+      setBoxes((bs) => [...bs, action.box])
+    } else {
+      updateBox(action.id, action.before)
+    }
     redoStack.current.push(action)
+    syncUndoButtons()
     scheduleSave()
   }
 
-  //re-delete the box an undo brought back
-  function redoDelete() {
+  //re-apply the most recently undone action
+  function redo() {
     const action = redoStack.current.pop()
     if (!action) return
-    setBoxes((bs) => bs.filter((b) => b.id !== action.box.id))
+    if (action.type === 'delete') {
+      setBoxes((bs) => bs.filter((b) => b.id !== action.box.id))
+    } else {
+      updateBox(action.id, action.after)
+    }
     undoStack.current.push(action)
+    syncUndoButtons()
     scheduleSave()
   }
-  //keep the once-bound key listener pointed at the latest closures
-  const undoRef = useRef(undoDelete)
-  undoRef.current = undoDelete
-  const redoRef = useRef(redoDelete)
-  redoRef.current = redoDelete
+  //keep the once-bound key/click listeners pointed at the latest closures
+  const undoRef = useRef(undo)
+  undoRef.current = undo
+  const redoRef = useRef(redo)
+  redoRef.current = redo
 
   function onBoxInput(id: string, html: string) {
     boxHtml.current[id] = html
@@ -697,7 +822,7 @@ export function PageCanvas({
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      <PageEditor key={pageKey} content={docHtml.current} onSave={onDocChange} />
+      <PageEditor key={pageKey} content={docHtml.current} onSave={onDocChange} editorOut={editorCan} />
 
       {/*hidden picker + import button, vertically centered in the 48px toolbar
          strip at the top of the editor*/}
@@ -789,6 +914,8 @@ export function PageCanvas({
                     box={b}
                     url={b.file ? mediaUrls.current.get(b.file) : undefined}
                     onGeom={(patch) => updateBox(b.id, patch)}
+                    onGeomBegin={() => beginGeom(b.id)}
+                    onGeomCommit={() => commitGeom(b.id)}
                     onRemove={() => removeBox(b.id)}
                   />
                 ) : b.kind === 'attachment' ? (
@@ -797,6 +924,8 @@ export function PageCanvas({
                     box={b}
                     url={b.file ? mediaUrls.current.get(b.file) : undefined}
                     onMove={(x, y) => updateBox(b.id, { x, y })}
+                    onGeomBegin={() => beginGeom(b.id)}
+                    onGeomCommit={() => commitGeom(b.id)}
                     onRemove={() => removeBox(b.id)}
                     onInsertPrintout={
                       isPdf(b.mime, b.name) ? () => insertPrintout(b) : undefined
@@ -811,6 +940,8 @@ export function PageCanvas({
                     onInput={(html) => onBoxInput(b.id, html)}
                     onMove={(x, y) => updateBox(b.id, { x, y })}
                     onResize={(w) => updateBox(b.id, { w })}
+                    onGeomBegin={() => beginGeom(b.id)}
+                    onGeomCommit={() => commitGeom(b.id)}
                     onRemove={() => removeBox(b.id)}
                   />
                 ),
@@ -880,6 +1011,9 @@ interface BoxProps {
   onInput: (html: string) => void
   onMove: (x: number, y: number) => void
   onResize: (w: number) => void
+  //bracket a move/resize gesture so it lands as a single undo step
+  onGeomBegin: () => void
+  onGeomCommit: () => void
   onRemove: () => void
 }
 
@@ -905,11 +1039,17 @@ function ImageBox({
   box,
   url,
   onGeom,
+  onGeomBegin,
+  onGeomCommit,
   onRemove,
 }: {
   box: BoxMeta
   url?: string
   onGeom: (patch: Partial<BoxMeta>) => void
+  //bracket a move/resize/crop gesture (or a menu edit session) so it lands as a
+  //single undo step
+  onGeomBegin: () => void
+  onGeomCommit: () => void
   onRemove: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -944,6 +1084,7 @@ function ImageBox({
   function startDrag(e: React.PointerEvent) {
     e.preventDefault()
     ref.current?.focus()
+    onGeomBegin()
     const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y }
     const el = e.currentTarget as HTMLElement
     el.setPointerCapture(e.pointerId)
@@ -959,6 +1100,7 @@ function ImageBox({
       el.removeEventListener('pointermove', move)
       el.removeEventListener('pointerup', up)
       document.body.style.cursor = ''
+      onGeomCommit()
     }
     el.addEventListener('pointermove', move)
     el.addEventListener('pointerup', up)
@@ -970,6 +1112,7 @@ function ImageBox({
     e.preventDefault()
     e.stopPropagation()
     ref.current?.focus()
+    onGeomBegin()
     const el = e.currentTarget as HTMLElement
     el.setPointerCapture(e.pointerId)
     const s = { px: e.clientX, py: e.clientY, x: box.x, y: box.y, w, h }
@@ -1003,6 +1146,7 @@ function ImageBox({
       el.releasePointerCapture(ev.pointerId)
       el.removeEventListener('pointermove', move)
       el.removeEventListener('pointerup', up)
+      onGeomCommit()
     }
     el.addEventListener('pointermove', move)
     el.addEventListener('pointerup', up)
@@ -1037,11 +1181,14 @@ function ImageBox({
           }
           onCancel={() => setCropping(false)}
           onConfirm={(r) => {
+            //one undo step for the whole crop: snapshot, apply, commit
+            onGeomBegin()
             onGeom({
               crop: { x: r.x / fullW, y: r.y / fullH, w: r.w / fullW, h: r.h / fullH },
               w: Math.round(r.w),
               h: Math.round(r.h),
             })
+            onGeomCommit()
             setCropping(false)
           }}
         />
@@ -1061,6 +1208,9 @@ function ImageBox({
       onContextMenu={(e) => {
         e.preventDefault()
         ref.current?.focus()
+        //snapshot geometry so all edits made from the menu collapse into one
+        //undo step, committed when the menu closes
+        onGeomBegin()
         setMenu({ x: e.clientX, y: e.clientY })
       }}
       onKeyDown={(e) => {
@@ -1108,10 +1258,17 @@ function ImageBox({
           radius={Math.round(box.radius ?? 0)}
           aspect={box.aspect}
           cropped={!!box.crop}
-          onClose={() => setMenu(null)}
+          onClose={() => {
+            setMenu(null)
+            //commit whatever the menu edited as a single undo step
+            onGeomCommit()
+          }}
           onGeom={onGeom}
           onRemove={onRemove}
           onCrop={() => {
+            //close the menu session (commit its edits) before the crop, which
+            //records its own undo step on confirm
+            onGeomCommit()
             setMenu(null)
             setCropping(true)
           }}
@@ -1417,12 +1574,16 @@ function AttachmentBox({
   box,
   url,
   onMove,
+  onGeomBegin,
+  onGeomCommit,
   onRemove,
   onInsertPrintout,
 }: {
   box: BoxMeta
   url?: string
   onMove: (x: number, y: number) => void
+  onGeomBegin: () => void
+  onGeomCommit: () => void
   onRemove: () => void
   onInsertPrintout?: () => void
 }) {
@@ -1433,6 +1594,7 @@ function AttachmentBox({
     e.preventDefault()
     e.stopPropagation()
     ref.current?.focus()
+    onGeomBegin()
     const el = e.currentTarget as HTMLElement
     el.setPointerCapture(e.pointerId)
     const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y, moved: false }
@@ -1446,7 +1608,9 @@ function AttachmentBox({
       el.releasePointerCapture(ev.pointerId)
       el.removeEventListener('pointermove', move)
       el.removeEventListener('pointerup', up)
-      //a plain click only selects, it does not open (double click opens)
+      //a plain click only selects, it does not open (double click opens). a move
+      //that actually shifted the pill commits one undo step, else it is a no-op
+      onGeomCommit()
     }
     el.addEventListener('pointermove', move)
     el.addEventListener('pointerup', up)
@@ -1558,7 +1722,7 @@ function AttachmentMenu({
 }
 
 //a single draggable, editable text container
-function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove }: BoxProps) {
+function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBegin, onGeomCommit, onRemove }: BoxProps) {
   const body = useRef<HTMLDivElement>(null)
   //grey line on hover/focus is a box-shadow ring not a border: tailwind preflight
   //resets border-width to 0 on every element so a border colour never paints,
@@ -1594,6 +1758,7 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
   function startDrag(e: React.PointerEvent) {
     if (!hasContent()) return
     e.preventDefault()
+    onGeomBegin()
     const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y }
     const el = e.currentTarget as HTMLElement
     el.setPointerCapture(e.pointerId)
@@ -1610,6 +1775,7 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
       el.removeEventListener('pointermove', move)
       el.removeEventListener('pointerup', up)
       document.body.style.cursor = ''
+      onGeomCommit()
     }
     el.addEventListener('pointermove', move)
     el.addEventListener('pointerup', up)
@@ -1619,6 +1785,7 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
   function startResize(e: React.PointerEvent) {
     e.preventDefault()
     e.stopPropagation()
+    onGeomBegin()
     const el = e.currentTarget as HTMLElement
     //first resize of an auto-sized box: start from its current rendered width
     const startW = box.w ?? el.parentElement?.offsetWidth ?? 80
@@ -1631,6 +1798,7 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onRemove 
       el.releasePointerCapture(ev.pointerId)
       el.removeEventListener('pointermove', move)
       el.removeEventListener('pointerup', up)
+      onGeomCommit()
     }
     el.addEventListener('pointermove', move)
     el.addEventListener('pointerup', up)

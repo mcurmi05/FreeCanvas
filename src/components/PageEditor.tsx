@@ -22,14 +22,22 @@ import { HorizontalRule } from 'reactjs-tiptap-editor/horizontalrule'
 import { Blockquote } from 'reactjs-tiptap-editor/blockquote'
 import 'reactjs-tiptap-editor/style.css'
 
+//minimal slice of the tiptap editor we poll for toolbar undo/redo availability
+export interface EditorCan {
+  can: () => { undo: () => boolean; redo: () => boolean }
+}
+
 interface Props {
   content: string
   onSave: (html: string) => void
+  //receives the live editor (or null on teardown) so the canvas can ask whether
+  //the document itself still has anything to undo/redo
+  editorOut?: { current: EditorCan | null }
 }
 
 //word style toolbar editor, forked off reactjs-tiptap-editor (MIT)
 //the page that mounts this should key it by page so switching reloads content
-export function PageEditor({ content, onSave }: Props) {
+export function PageEditor({ content, onSave, editorOut }: Props) {
   const timer = useRef<number | undefined>(undefined)
 
   //the toolbar features, font family, size and line height give the word feel
@@ -72,6 +80,11 @@ export function PageEditor({ content, onSave }: Props) {
 
   return (
     <RichTextEditor
+      //callback ref dodges the component's exact ref type, just publish the
+      //live editor instance to the canvas (null on unmount)
+      ref={(inst: { editor: EditorCan | null } | null) => {
+        if (editorOut) editorOut.current = inst?.editor ?? null
+      }}
       output="html"
       content={content}
       extensions={extensions}
