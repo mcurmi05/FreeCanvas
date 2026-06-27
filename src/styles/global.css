@@ -589,23 +589,36 @@
 
 /*no box around the number: blends into the pill, just the white digits. strip
   the user-agent border/appearance/shadow too*/
-.canvas-pdf-page-input {
-  width: 2.2em;
+/*two classes so it outranks any same-specificity rule; the native text-field
+  bezel only shows at rest, so kill appearance + border outright*/
+.canvas-pdf-controls .canvas-pdf-page-input,
+.canvas-pdf-controls .canvas-pdf-page-input:focus,
+.canvas-pdf-controls .canvas-pdf-page-input:focus-visible {
   background: transparent;
   color: #fff;
-  text-align: right;
+  text-align: center;
   font-size: 0.75rem;
-  border: 0;
+  border: none;
   outline: none;
   box-shadow: none;
   appearance: none;
   -webkit-appearance: none;
+  color-scheme: light;
 }
 
-/*the field auto-selects on focus; keep that highlight from reading as a white
-  box by toning it down to a faint translucent fill*/
+/*when focused, light up just the editable number so it reads as an active edit
+  field: a boxed highlight + visible caret tell the user typing now changes the
+  page (the / N total stays plain so it's clear which part you're editing)*/
+.canvas-pdf-controls .canvas-pdf-page-input:focus {
+  background: rgb(255 255 255 / 0.22);
+  border-radius: 5px;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.55);
+  caret-color: #fff;
+}
+
+/*show the auto-select highlight so the editable digits look selected/replaceable*/
 .canvas-pdf-page-input::selection {
-  background: rgb(255 255 255 / 0.25);
+  background: rgb(255 255 255 / 0.35);
 }
 
 .canvas-pdf-count-total {

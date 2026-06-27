@@ -272,7 +272,9 @@ export function NotebookScreen() {
             content={pageContent}
             pageDir={activePage.dirHandle}
             ensurePageDir={promoteActivePageToFolder}
-            onSave={savePage}
+            //bind the save to this page so a debounced flush that lands after a
+            //switch writes this file, not whatever page became active meanwhile
+            onSave={(html) => savePage(html, activePage)}
             onRenamePage={(name) => renameNode(activePage.path, name)}
             toggleTitleNonce={toggleTitleNonce}
             onTitleHiddenChange={setActiveTitleHidden}

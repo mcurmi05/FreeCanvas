@@ -136,6 +136,12 @@ export function PageCanvas({
   //ignore the store echo of our own save, only adopt external content
   const lastSaved = useRef(content)
   const saveTimer = useRef<number | undefined>(undefined)
+  //always save through the latest onSave, never a stale closure: a first import
+  //promotes the page to a folder mid-flight, swapping onSave to target the new
+  //index.html. an in-flight import that captured the old leaf-bound onSave would
+  //otherwise write the box to the now-orphaned leaf file and lose it
+  const onSaveRef = useRef(onSave)
+  onSaveRef.current = onSave
 
   function buildHtml(): string {
     const current = boxesRef.current.map((b) => ({
@@ -156,17 +162,20 @@ export function PageCanvas({
     saveTimer.current = window.setTimeout(() => {
       const html = buildHtml()
       lastSaved.current = html
-      onSave(html)
+      onSaveRef.current(html)
     }, 500)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onSave])
+  }, [])
 
-  //write any pending changes right now, used before a rename copies the file
+  //write any pending changes right now, used before a rename copies the file and
+  //on unmount. skip when nothing changed so a plain page switch never rewrites
+  //the file (or risks resurrecting one deleted out from under us)
   async function flushSave() {
     window.clearTimeout(saveTimer.current)
     const html = buildHtml()
+    if (html === lastSaved.current) return
     lastSaved.current = html
-    await onSave(html)
+    await onSaveRef.current(html)
   }
 
   //keep a ref mirror of boxes so the debounced save sees the latest
@@ -315,6 +324,9 @@ export function PageCanvas({
   //closing, there is no longer anything to undo into), then revoke remaining urls
   useEffect(
     () => () => {
+      //flush any debounced edit now (page-bound onSave writes the right file)
+      //instead of leaving a timer to fire after this instance is gone
+      void flushSave()
       undoStack.current.forEach(finalizeDelete)
       mediaUrls.current.forEach((u) => URL.revokeObjectURL(u))
       mediaUrls.current.clear()
@@ -2526,6 +2538,8 @@ function PdfBox({
               className="canvas-pdf-page-input"
               inputMode="numeric"
               aria-label="page number"
+              //width tracks the current number's digits so the pill recenters as it grows/shrinks
+              style={{ width: `${Math.max(pageInput.length, 1) + 0.7}ch` }}
               value={pageInput}
               onChange={(e) => setPageInput(e.target.value.replace(/[^0-9]/g, ''))}
               onFocus={(e) => e.currentTarget.select()}
