@@ -544,6 +544,69 @@
   box-shadow: 0 1px 4px rgb(0 0 0 / 0.15);
 }
 
+/*continuous scroll viewer: pages stacked top to bottom, centered, scrollable.
+  pans horizontally too once a page is zoomed wider than the window*/
+.canvas-pdf-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  background: #f3f4f6;
+}
+
+/*each page slot reserves its height (set inline from the aspect ratio) so the
+  scrollbar is stable before the canvas paints. relative so the text layer can
+  overlay the canvas*/
+.canvas-pdf-page {
+  position: relative;
+  flex: 0 0 auto;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.15);
+}
+
+.canvas-pdf-page-canvas {
+  display: block;
+}
+
+/*pdf.js text layer: transparent, absolutely-positioned spans matching the glyph
+  layout so the rendered page is selectable. spans get their own inline left/top/
+  font-size/transform from pdf.js; --scale-factor is set via setLayerDimensions*/
+.textLayer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 1;
+  caret-color: CanvasText;
+}
+
+.textLayer span,
+.textLayer br {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+
+.textLayer span.markedContent {
+  top: 0;
+  height: 0;
+}
+
+.textLayer ::selection {
+  background: rgb(0 100 255 / 0.28);
+}
+
 /*bottom-center control pill: prev arrow, page field, total, next arrow*/
 .canvas-pdf-controls {
   position: absolute;

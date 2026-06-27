@@ -1,5 +1,10 @@
 import * as pdfjs from 'pdfjs-dist'
-import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
+import type {
+  PDFDocumentLoadingTask,
+  PDFDocumentProxy,
+  RenderTask,
+  TextLayer,
+} from 'pdfjs-dist'
 //bundled worker, resolved to a url by vite
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 
@@ -39,11 +44,12 @@ export async function pageAspects(data: ArrayBuffer): Promise<number[]> {
   return out
 }
 
-//open a pdf for interactive page-by-page rendering (slideshow mode). caller
-//must call .destroy() on the result when done. data is consumed, pass a fresh
-//buffer
-export async function openPdf(data: ArrayBuffer): Promise<PDFDocumentProxy> {
-  return pdfjs.getDocument({ data }).promise
+//open a pdf for interactive page-by-page rendering (slideshow mode). returns the
+//loading task: await .promise for the document, and call .destroy() on the task
+//(not the document — PDFDocumentProxy has no destroy) to tear down and terminate
+//the worker when done. data is consumed, pass a fresh buffer
+export function openPdf(data: ArrayBuffer): PDFDocumentLoadingTask {
+  return pdfjs.getDocument({ data })
 }
 
 //render one page of an open pdf into a canvas, scaled to fit within maxW x maxH
@@ -54,6 +60,8 @@ export async function openPdf(data: ArrayBuffer): Promise<PDFDocumentProxy> {
 //zoom multiplies the fit scale: 1 fills the window, >1 overflows (pannable).
 //returns the render task plus the page's css size, so the caller can size a
 //window to exactly hold the page at the current zoom
+//pass a container to also render a selectable text layer over the canvas. the
+//returned textLayer (if any) must be .cancel()'d alongside the render task
 export async function renderPdfPage(
   pdf: PDFDocumentProxy,
   num: number,
@@ -61,7 +69,8 @@ export async function renderPdfPage(
   maxW: number,
   maxH: number,
   zoom = 1,
-): Promise<{ task: RenderTask; cssW: number; cssH: number }> {
+  textContainer?: HTMLDivElement,
+): Promise<{ task: RenderTask; cssW: number; cssH: number; textLayer?: TextLayer }> {
   const page = await pdf.getPage(num)
   const base = page.getViewport({ scale: 1 })
   const fit = Math.min(maxW / base.width, maxH / base.height) * zoom
@@ -75,7 +84,23 @@ export async function renderPdfPage(
   canvas.style.height = `${cssH}px`
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('no 2d context')
-  return { task: page.render({ canvasContext: ctx, viewport, canvas }), cssW, cssH }
+  const task = page.render({ canvasContext: ctx, viewport, canvas })
+  let textLayer: TextLayer | undefined
+  if (textContainer) {
+    //the text layer lays out at css scale (no dpr); its transparent spans sit
+    //over the canvas so the user can select and copy real text
+    const { TextLayer, setLayerDimensions } = await import('pdfjs-dist')
+    const cssViewport = page.getViewport({ scale: fit })
+    textContainer.replaceChildren()
+    setLayerDimensions(textContainer, cssViewport)
+    textLayer = new TextLayer({
+      textContentSource: page.streamTextContent(),
+      container: textContainer,
+      viewport: cssViewport,
+    })
+    void textLayer.render().catch(() => {})
+  }
+  return { task, cssW, cssH, textLayer }
 }
 
 //render every page of a pdf to a png blob. data is consumed, pass a fresh

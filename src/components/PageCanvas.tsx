@@ -1,6 +1,9 @@
 import {
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
   useReducer,
   useRef,
   useState,
@@ -35,7 +38,7 @@ import { ImportChoiceDialog, type ImportChoice } from '@/components/ImportChoice
 import { File as FileIcon, FileText, Info } from 'lucide-react'
 import { validateName } from '@/lib/fs'
 import { DEFAULT_DOC_WIDTH, parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
-import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
+import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 
 interface Props {
   pageKey: string
@@ -70,6 +73,8 @@ const MIN_PDF_W = 220
 const MIN_PDF_H = 220
 //css width of a slideshow thumbnail (height follows the page aspect)
 const THUMB_W = 92
+//width of the thumbnail rail (matches .canvas-pdf-thumbs in global.css)
+const PDF_SIDEBAR_W = 124
 //warn before rasterising a pdf with more pages than this
 const PRINTOUT_WARN_PAGES = 30
 const SCROLL_PAD = 240
@@ -2317,19 +2322,22 @@ function PdfBox({
   //in scroll mode snap the height to one page at the current width
   function fitOnePage() {
     const barH = barRef.current?.clientHeight ?? 32
-    if (slides) {
-      const ps = pageSizeRef.current
-      if (!ps) return
-      onGeomBegin()
-      onGeom({ w: Math.round(ps.w), h: Math.round(barH + ps.h) })
-      onGeomCommit()
-      setSlideZoom(1)
-      return
-    }
-    const ratio = box.aspect ?? w / h
+    //both modes report the current page's css size at the current zoom: size the
+    //window to exactly one page (width and height) and leave the zoom untouched.
+    //add the thumbnail rail's width when it's open so the page area still fits
+    const ps = pageSizeRef.current
+    if (!ps) return
+    const side = sidebar ? PDF_SIDEBAR_W : 0
     onGeomBegin()
-    onGeom({ h: Math.round(barH + w / ratio) })
+    //scroll also adds the viewer's 10px top+bottom + left+right padding so the
+    //page isn't clipped; the slide stage has no padding
+    if (slides) onGeom({ w: Math.round(ps.w + side), h: Math.round(barH + ps.h) })
+    else onGeom({ w: Math.round(ps.w + 20 + side), h: Math.round(barH + ps.h + 20) })
     onGeomCommit()
+    //the window now wraps the page at its current on-screen size, so normalise
+    //zoom to 1 (= fills the new width). without this the old zoom stays relative
+    //to the new, smaller width and the page no longer fits one page
+    setSlideZoom(1)
   }
 
   //extend the bottom so the window is tall enough to show the whole pdf, every
@@ -2462,27 +2470,25 @@ function PdfBox({
           <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden />
           <span className="canvas-attachment-name">{box.name ?? box.file}</span>
         </button>
-        {/*thumbnail sidebar toggle (slideshow only), pushed to the right. own
+        {/*thumbnail sidebar toggle (both modes), pushed to the right. own
            pointer handlers stop the bar's drag/open from firing*/}
-        {slides && (
-          <button
-            type="button"
-            className="canvas-pdf-info-btn ml-auto"
-            aria-label={sidebar ? 'hide thumbnails' : 'show thumbnails'}
-            title={sidebar ? 'hide thumbnails' : 'show thumbnails'}
-            onPointerDown={(e) => e.stopPropagation()}
-            onDoubleClick={(e) => e.stopPropagation()}
-            onClick={() => setSidebar((s) => !s)}
-          >
-            {sidebar ? (
-              <PanelRightClose className="size-4" aria-hidden />
-            ) : (
-              <PanelRightOpen className="size-4" aria-hidden />
-            )}
-          </button>
-        )}
+        <button
+          type="button"
+          className="canvas-pdf-info-btn ml-auto"
+          aria-label={sidebar ? 'hide thumbnails' : 'show thumbnails'}
+          title={sidebar ? 'hide thumbnails' : 'show thumbnails'}
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          onClick={() => setSidebar((s) => !s)}
+        >
+          {sidebar ? (
+            <PanelRightClose className="size-4" aria-hidden />
+          ) : (
+            <PanelRightOpen className="size-4" aria-hidden />
+          )}
+        </button>
       </div>
-      {!live ? (
+      {!live || !url ? (
         <div className="canvas-image-loading" />
       ) : slides ? (
         //slideshow: one page rendered at a time, paged by the arrows below
@@ -2496,20 +2502,19 @@ function PdfBox({
           onPageSize={(pw, ph) => (pageSizeRef.current = { w: pw, h: ph })}
           onJump={gotoPage}
         />
-      ) : url ? (
-        //hide the native viewer's chrome so it reads as an inline window. key by
-        //the url so a freshly resolved object url mounts a clean iframe: a bare
-        //src swap can leave the native pdf viewer stuck on a revoked blob (grey
-        //pages) after the strict-mode mount/revoke/remount cycle
-        <iframe
-          key={url}
-          src={`${url}#toolbar=0&navpanes=0`}
-          className="canvas-pdf-frame"
-          style={interacting ? { pointerEvents: 'none' } : undefined}
-          title={box.name ?? 'pdf'}
-        />
       ) : (
-        <div className="canvas-image-loading" />
+        //scroll: all pages stacked in a canvas viewer we control, so zoom,
+        //thumbnails and fit-one-page work the same as slideshow (the native
+        //iframe viewer exposed none of that and crashed on teardown)
+        <PdfScroll
+          url={url}
+          zoom={slideZoom}
+          sidebar={sidebar}
+          interacting={interacting}
+          onCount={onSlideCount}
+          onZoom={zoomBy}
+          onPageSize={(pw, ph) => (pageSizeRef.current = { w: pw, h: ph })}
+        />
       )}
 
       {/*slideshow controls: a pill at the bottom center, arrows flanking the
@@ -2627,6 +2632,9 @@ function PdfSlides({
   const wrapRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const pdfRef = useRef<PDFDocumentProxy | null>(null)
+  //the loading task owns teardown: destroy it (not the document proxy, which has
+  //no destroy) to tear down the pdf and terminate its worker
+  const taskRef = useRef<PDFDocumentLoadingTask | null>(null)
   const [ready, setReady] = useState(false)
   //page count, kept in state so the thumbnail list renders once loaded
   const [count, setCount] = useState(0)
@@ -2652,9 +2660,11 @@ function PdfSlides({
     ;(async () => {
       const data = await fetch(url).then((r) => r.arrayBuffer())
       const { openPdf } = await import('@/lib/pdfPrintout')
-      const pdf = await openPdf(data)
+      const task = openPdf(data)
+      taskRef.current = task
+      const pdf = await task.promise
       if (cancelled) {
-        pdf.destroy().catch(() => {})
+        task.destroy().catch(() => {})
         return
       }
       pdfRef.current = pdf
@@ -2664,11 +2674,12 @@ function PdfSlides({
     })()
     return () => {
       cancelled = true
-      const pdf = pdfRef.current
       pdfRef.current = null
-      //destroy returns a promise that rejects if a render is mid-flight; swallow
-      //it so tearing down (e.g. switching back to scroll view) never crashes
-      pdf?.destroy().catch(() => {})
+      const task = taskRef.current
+      taskRef.current = null
+      //destroy the loading task (rejects if a render is mid-flight; swallow it)
+      //so tearing down (e.g. switching back to scroll view) never crashes
+      task?.destroy().catch(() => {})
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url])
@@ -2739,6 +2750,303 @@ function PdfSlides({
     </div>
   )
 }
+
+//continuous scroll viewer: every page stacked in a canvas viewer we own, so
+//zoom, the thumbnail sidebar and fit-one-page work just like slideshow mode.
+//replaces the native iframe viewer, which exposed no zoom/thumbnails and crashed
+//on teardown. pages render lazily as they near the viewport so big decks stay cheap
+function PdfScroll({
+  url,
+  zoom,
+  sidebar,
+  interacting,
+  onCount,
+  onZoom,
+  onPageSize,
+}: {
+  url?: string
+  zoom: number
+  sidebar: boolean
+  //while the window is being dragged/resized the viewer must not eat the gesture
+  interacting: boolean
+  onCount: (n: number) => void
+  onZoom: (factor: number) => void
+  onPageSize: (cssW: number, cssH: number) => void
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const pdfRef = useRef<PDFDocumentProxy | null>(null)
+  const taskRef = useRef<PDFDocumentLoadingTask | null>(null)
+  const slotRefs = useRef<(HTMLDivElement | null)[]>([])
+  const [ready, setReady] = useState(false)
+  //per-page width/height ratios, sized up front so each slot reserves its height
+  //before painting and the scroll position stays put as pages stream in
+  const [aspects, setAspects] = useState<number[]>([])
+  //the page-area content width (zoom 1 fills it); pages render at width * zoom
+  const [width, setWidth] = useState(0)
+  //the most-visible page, drives the active thumbnail and the fit-one-page size
+  const [current, setCurrent] = useState(1)
+
+  //track the page area's content width (client width minus padding)
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const measure = () => {
+      const cs = getComputedStyle(el)
+      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+      setWidth(Math.max(0, el.clientWidth - padX))
+    }
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    measure()
+    return () => ro.disconnect()
+  }, [])
+
+  //load the document and every page's aspect ratio (tear down on url/unmount)
+  useEffect(() => {
+    if (!url) return
+    let cancelled = false
+    setReady(false)
+    setAspects([])
+    ;(async () => {
+      const data = await fetch(url).then((r) => r.arrayBuffer())
+      const { openPdf } = await import('@/lib/pdfPrintout')
+      const task = openPdf(data)
+      taskRef.current = task
+      const pdf = await task.promise
+      if (cancelled) {
+        task.destroy().catch(() => {})
+        return
+      }
+      pdfRef.current = pdf
+      const out: number[] = []
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const vp = (await pdf.getPage(i)).getViewport({ scale: 1 })
+        if (cancelled) return
+        out.push(vp.width && vp.height ? vp.width / vp.height : 0.707)
+      }
+      if (cancelled) return
+      setAspects(out)
+      onCount(pdf.numPages)
+      setReady(true)
+    })()
+    return () => {
+      cancelled = true
+      pdfRef.current = null
+      const task = taskRef.current
+      taskRef.current = null
+      //destroy the loading task, not the document proxy (it has no destroy)
+      task?.destroy().catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url])
+
+  //pick the most-visible page so the active thumbnail + reported page size follow
+  //what the user is reading
+  useEffect(() => {
+    const root = wrapRef.current
+    if (!root || !ready) return
+    const ratios = new Map<number, number>()
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          ratios.set(Number((e.target as HTMLElement).dataset.page), e.intersectionRatio)
+        }
+        let best = 1
+        let bestRatio = -1
+        ratios.forEach((r, n) => {
+          if (r > bestRatio) {
+            bestRatio = r
+            best = n
+          }
+        })
+        setCurrent(best)
+      },
+      { root, threshold: [0, 0.25, 0.5, 0.75, 1] },
+    )
+    slotRefs.current.forEach((el) => el && io.observe(el))
+    return () => io.disconnect()
+  }, [ready, aspects.length])
+
+  //report the current page's rendered css size at the current zoom, so "fit one
+  //page" can size the window to exactly one page without touching the zoom
+  useEffect(() => {
+    const a = aspects[current - 1]
+    if (a && width > 0) onPageSize(width * zoom, (width * zoom) / a)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, width, aspects, zoom])
+
+  //ctrl/cmd + wheel zooms. native listener so preventDefault beats passive scroll
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return
+      e.preventDefault()
+      onZoom(e.deltaY < 0 ? 1.1 : 1 / 1.1)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  //the content point sitting at the viewport top, tracked on scroll so a zoom
+  //(which rescales every page) can restore it and keep the view stationary
+  const anchor = useRef({ page: 1, frac: 0 })
+  function onScroll() {
+    const el = wrapRef.current
+    if (!el) return
+    const top = el.scrollTop
+    const slots = slotRefs.current
+    for (let i = 0; i < slots.length; i++) {
+      const s = slots[i]
+      if (!s) continue
+      if (top < s.offsetTop + s.offsetHeight || i === slots.length - 1) {
+        anchor.current = { page: i + 1, frac: s.offsetHeight ? (top - s.offsetTop) / s.offsetHeight : 0 }
+        break
+      }
+    }
+  }
+
+  //after a zoom/width relayout, put the anchored content point back at the top so
+  //the page you were reading doesn't jump around under your eyes
+  useLayoutEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const s = slotRefs.current[anchor.current.page - 1]
+    if (!s) return
+    el.scrollTop = s.offsetTop + anchor.current.frac * s.offsetHeight
+  }, [zoom, width])
+
+  function jump(n: number) {
+    slotRefs.current[n - 1]?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  }
+
+  return (
+    <div className="canvas-pdf-stage">
+      <div
+        ref={wrapRef}
+        className="canvas-pdf-scroll"
+        style={interacting ? { pointerEvents: 'none' } : undefined}
+        onScroll={onScroll}
+      >
+        {ready && width > 0 ? (
+          aspects.map((a, i) => (
+            <PdfPage
+              key={i}
+              ref={(el) => {
+                slotRefs.current[i] = el
+              }}
+              pdf={pdfRef.current!}
+              num={i + 1}
+              width={width * zoom}
+              aspect={a}
+            />
+          ))
+        ) : (
+          <div className="canvas-image-loading" />
+        )}
+      </div>
+      {sidebar && ready && pdfRef.current && (
+        <div className="canvas-pdf-thumbs">
+          {aspects.map((_, i) => (
+            <PdfThumb
+              key={i}
+              pdf={pdfRef.current!}
+              num={i + 1}
+              active={i + 1 === current}
+              onClick={() => jump(i + 1)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+//one page in the continuous scroll viewer. reserves its height from the aspect
+//ratio, then renders its canvas once it nears the viewport, re-rendering crisp
+//whenever the target width (zoom) changes. forwards its root node so the viewer
+//can observe and scroll to it
+const PdfPage = forwardRef<
+  HTMLDivElement,
+  { pdf: PDFDocumentProxy; num: number; width: number; aspect: number }
+>(function PdfPage({ pdf, num, width, aspect }, ref) {
+  const innerRef = useRef<HTMLDivElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const textRef = useRef<HTMLDivElement>(null)
+  const [shown, setShown] = useState(false)
+  useImperativeHandle(ref, () => innerRef.current as HTMLDivElement, [])
+
+  //render only once the page scrolls within ~one screen of the viewport
+  useEffect(() => {
+    const el = innerRef.current
+    if (!el || shown) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setShown(true)
+          io.disconnect()
+        }
+      },
+      { root: el.parentElement, rootMargin: '600px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [shown])
+
+  //(re)paint at the target css width whenever it (the zoom) changes
+  useEffect(() => {
+    if (!shown || width < 2) return
+    const canvas = canvasRef.current
+    if (!canvas) return
+    let cancelled = false
+    let task: RenderTask | null = null
+    let textLayer: { cancel: () => void } | undefined
+    ;(async () => {
+      try {
+        const { renderPdfPage } = await import('@/lib/pdfPrintout')
+        if (cancelled) return
+        const res = await renderPdfPage(
+          pdf,
+          num,
+          canvas,
+          width,
+          1e6,
+          1,
+          textRef.current ?? undefined,
+        )
+        task = res.task
+        textLayer = res.textLayer
+        await task.promise
+      } catch {
+        //superseded/cancelled render rejects, ignore
+      }
+    })()
+    return () => {
+      cancelled = true
+      task?.cancel()
+      textLayer?.cancel()
+    }
+  }, [shown, pdf, num, width])
+
+  return (
+    <div
+      ref={innerRef}
+      className="canvas-pdf-page"
+      data-page={num}
+      //reserve the page's height before it paints so scroll position is stable
+      style={{ width, height: width / aspect }}
+    >
+      {shown && (
+        <>
+          <canvas ref={canvasRef} className="canvas-pdf-page-canvas" />
+          {/*transparent selectable text over the canvas (pdf.js text layer)*/}
+          <div ref={textRef} className="textLayer" />
+        </>
+      )}
+    </div>
+  )
+})
 
 //one thumbnail in the slideshow sidebar. renders its page only once it scrolls
 //into the sidebar viewport, keeping big decks cheap. the active page scrolls
