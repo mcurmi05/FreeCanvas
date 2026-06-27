@@ -25,6 +25,11 @@ export interface BoxMeta {
   name?: string
   //width/height ratio of an image, keeps resize aspect-locked
   aspect?: number
+  //corner rounding in px, image boxes only
+  radius?: number
+  //visible crop region as fractions of the original image (x,y top-left, w,h
+  //size, all 0..1). absent means the whole image is shown
+  crop?: { x: number; y: number; w: number; h: number }
 }
 
 //escape a string for use inside a double-quoted html attribute
@@ -78,6 +83,13 @@ export function parsePage(content: string): ParsedPage {
     const kind =
       kindAttr === 'image' || kindAttr === 'attachment' ? kindAttr : undefined
     const aspect = parseFloat(el.getAttribute('data-aspect') ?? '')
+    const radius = parseFloat(el.getAttribute('data-radius') ?? '')
+    //crop is four comma-separated fractions: x,y,w,h
+    const cropParts = (el.getAttribute('data-crop') ?? '').split(',').map(Number)
+    const crop =
+      cropParts.length === 4 && cropParts.every((n) => !isNaN(n))
+        ? { x: cropParts[0], y: cropParts[1], w: cropParts[2], h: cropParts[3] }
+        : undefined
     boxes.push({
       id: rid(),
       x: parseFloat(el.style.left) || 0,
@@ -92,6 +104,8 @@ export function parsePage(content: string): ParsedPage {
       mime: el.getAttribute('data-mime') || undefined,
       name: el.getAttribute('data-name') || undefined,
       aspect: isNaN(aspect) ? undefined : aspect,
+      radius: isNaN(radius) ? undefined : radius,
+      crop,
     })
   })
   const dw = parseFloat(docEl?.getAttribute('data-doc-w') ?? '')
@@ -131,7 +145,13 @@ export function serializePage(
             (b.file ? ` data-attachment="${escapeAttr(b.file)}"` : '') +
             (b.mime ? ` data-mime="${escapeAttr(b.mime)}"` : '') +
             (b.name ? ` data-name="${escapeAttr(b.name)}"` : '') +
-            (b.aspect ? ` data-aspect="${b.aspect}"` : '')
+            (b.aspect ? ` data-aspect="${b.aspect}"` : '') +
+            (b.radius ? ` data-radius="${Math.round(b.radius)}"` : '') +
+            (b.crop
+              ? ` data-crop="${[b.crop.x, b.crop.y, b.crop.w, b.crop.h]
+                  .map((n) => +n.toFixed(4))
+                  .join(',')}"`
+              : '')
           : ''
       //media boxes hold no inner html, only text boxes carry content
       const inner = b.kind && b.kind !== 'text' ? '' : b.html

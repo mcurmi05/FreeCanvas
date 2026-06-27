@@ -7,9 +7,8 @@ import {
   type CSSProperties,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { EyeOff } from 'lucide-react'
+import { Check, Crop, EyeOff, ImagePlus, Trash2 } from 'lucide-react'
 import { PageEditor } from '@/components/PageEditor'
-import { ImagePlus } from 'lucide-react'
 import { attachmentUrl } from '@/lib/attachments'
 import { importImage, isImage } from '@/lib/importFiles'
 import { validateName } from '@/lib/fs'
@@ -724,8 +723,31 @@ function ImageBox({
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const [selected, setSelected] = useState(false)
+  //right-click menu position, null when closed
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  //true while the crop tool is open over this image
+  const [cropping, setCropping] = useState(false)
   const w = box.w ?? DEFAULT_IMG_W
   const h = box.h ?? (box.aspect ? w / box.aspect : w)
+
+  //image styling. with a crop, scale the whole image up so the visible crop
+  //region exactly fills the box, then offset it; the frame's overflow clips it
+  const imgStyle: CSSProperties = box.crop
+    ? {
+        display: 'block',
+        position: 'absolute',
+        width: w / box.crop.w,
+        height: h / box.crop.h,
+        left: -box.crop.x * (w / box.crop.w),
+        top: -box.crop.y * (h / box.crop.h),
+        maxWidth: 'none',
+        objectFit: 'fill',
+      }
+    : { display: 'block', width: '100%', height: '100%', objectFit: 'fill', maxWidth: 'none' }
+
+  //full uncropped display size used while cropping, matches the current scale
+  const fullW = box.crop ? w / box.crop.w : w
+  const fullH = box.crop ? h / box.crop.h : box.aspect ? w / box.aspect : h
 
   //drag the body to reposition, clamped to the positive canvas
   function startDrag(e: React.PointerEvent) {
@@ -795,6 +817,47 @@ function ImageBox({
     el.addEventListener('pointerup', up)
   }
 
+  //crop tool: show the full uncropped image with a draggable selection over it
+  if (cropping && url) {
+    return (
+      <div
+        className="canvas-box canvas-image is-cropping"
+        style={{ left: box.x, top: box.y, width: fullW, height: fullH }}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <img
+          src={url}
+          alt=""
+          draggable={false}
+          style={{ display: 'block', width: '100%', height: '100%', objectFit: 'fill', maxWidth: 'none' }}
+        />
+        <CropOverlay
+          fullW={fullW}
+          fullH={fullH}
+          initial={
+            box.crop
+              ? {
+                  x: box.crop.x * fullW,
+                  y: box.crop.y * fullH,
+                  w: box.crop.w * fullW,
+                  h: box.crop.h * fullH,
+                }
+              : { x: 0, y: 0, w: fullW, h: fullH }
+          }
+          onCancel={() => setCropping(false)}
+          onConfirm={(r) => {
+            onGeom({
+              crop: { x: r.x / fullW, y: r.y / fullH, w: r.w / fullW, h: r.h / fullH },
+              w: Math.round(r.w),
+              h: Math.round(r.h),
+            })
+            setCropping(false)
+          }}
+        />
+      </div>
+    )
+  }
+
   return (
     <div
       ref={ref}
@@ -804,16 +867,31 @@ function ImageBox({
       onPointerDown={(e) => e.stopPropagation()}
       onFocus={() => setSelected(true)}
       onBlur={() => setSelected(false)}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        ref.current?.focus()
+        setMenu({ x: e.clientX, y: e.clientY })
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Delete' || e.key === 'Backspace') {
           e.preventDefault()
           onRemove()
+        } else if (e.key === 'Escape') {
+          //escape deselects the image
+          e.preventDefault()
+          ref.current?.blur()
         }
       }}
     >
-      <div className="canvas-image-frame" onPointerDown={startDrag}>
+      <div
+        className="canvas-image-frame"
+        style={{ borderRadius: box.radius || undefined }}
+        onPointerDown={startDrag}
+      >
         {url ? (
-          <img src={url} alt={box.name ?? ''} draggable={false} />
+          //inline sizing so the editor's own .rte-content img rules (this box is
+          //portaled into the editor) can't override it back to aspect height
+          <img src={url} alt={box.name ?? ''} draggable={false} style={imgStyle} />
         ) : (
           <div className="canvas-image-loading" />
         )}
@@ -830,6 +908,309 @@ function ImageBox({
             aria-hidden
           />
         ))}
+
+      {menu && (
+        <ImageMenu
+          menu={menu}
+          w={Math.round(w)}
+          h={Math.round(h)}
+          radius={Math.round(box.radius ?? 0)}
+          aspect={box.aspect}
+          cropped={!!box.crop}
+          onClose={() => setMenu(null)}
+          onGeom={onGeom}
+          onRemove={onRemove}
+          onCrop={() => {
+            setMenu(null)
+            setCropping(true)
+          }}
+          onResetCrop={() => onGeom({ crop: undefined, w: Math.round(fullW), h: Math.round(fullH) })}
+        />
+      )}
+    </div>
+  )
+}
+
+//right-click menu for an image: type exact dimensions, snap to an aspect ratio,
+//or round the corners. crop is a planned follow-up
+function ImageMenu({
+  menu,
+  w,
+  h,
+  radius,
+  aspect,
+  cropped,
+  onClose,
+  onGeom,
+  onRemove,
+  onCrop,
+  onResetCrop,
+}: {
+  menu: { x: number; y: number }
+  w: number
+  h: number
+  radius: number
+  aspect?: number
+  cropped: boolean
+  onClose: () => void
+  onGeom: (patch: Partial<BoxMeta>) => void
+  onRemove: () => void
+  onCrop: () => void
+  onResetCrop: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('pointerdown', onClose)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', onClose)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  //apply a target width/height ratio, keeping the current width
+  function setRatio(ratio: number) {
+    onGeom({ w, h: Math.round(w / ratio) })
+  }
+
+  return (
+    <div
+      role="menu"
+      className="fixed z-50 w-52 rounded-md border border-border bg-popover p-3 text-sm shadow-md"
+      style={{ left: menu.x, top: menu.y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <div className="mb-2 flex items-center gap-2">
+        <label className="flex flex-1 items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">W</span>
+          <input
+            type="number"
+            defaultValue={w}
+            min={MIN_IMG}
+            className="w-full rounded border border-border bg-background px-1.5 py-1 outline-none"
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10)
+              if (n >= MIN_IMG) onGeom({ w: n })
+            }}
+          />
+        </label>
+        <label className="flex flex-1 items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">H</span>
+          <input
+            type="number"
+            defaultValue={h}
+            min={MIN_IMG}
+            className="w-full rounded border border-border bg-background px-1.5 py-1 outline-none"
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10)
+              if (n >= MIN_IMG) onGeom({ h: n })
+            }}
+          />
+        </label>
+      </div>
+
+      <div className="mb-1 text-xs text-muted-foreground">Aspect ratio</div>
+      <div className="mb-3 flex flex-wrap gap-1">
+        {aspect && (
+          <button
+            onClick={() => setRatio(aspect)}
+            className="rounded border border-border px-2 py-0.5 text-xs outline-none hover:bg-accent"
+            title="reset to the image's original ratio"
+          >
+            Original
+          </button>
+        )}
+        {([
+          ['1:1', 1],
+          ['4:3', 4 / 3],
+          ['16:9', 16 / 9],
+          ['3:4', 3 / 4],
+        ] as const).map(([label, ratio]) => (
+          <button
+            key={label}
+            onClick={() => setRatio(ratio)}
+            className="rounded border border-border px-2 py-0.5 text-xs outline-none hover:bg-accent"
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <label className="block">
+        <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+          <span>Corner rounding</span>
+          <span>{radius}px</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={Math.round(Math.min(w, h) / 2)}
+          defaultValue={radius}
+          className="w-full"
+          onChange={(e) => onGeom({ radius: parseInt(e.target.value, 10) })}
+        />
+      </label>
+
+      <div className="mt-3 flex justify-start gap-1">
+        <button
+          onClick={() => onCrop()}
+          className="flex items-center gap-1.5 rounded border border-border px-2 py-1 text-xs outline-none hover:bg-accent"
+        >
+          <Crop className="size-3.5 shrink-0" aria-hidden />
+          Crop
+        </button>
+        {cropped && (
+          <button
+            onClick={() => {
+              onResetCrop()
+              onClose()
+            }}
+            className="flex items-center rounded border border-border px-2 py-1 text-xs outline-none hover:bg-accent"
+            title="restore the full uncropped image"
+          >
+            Reset crop
+          </button>
+        )}
+      </div>
+
+      <button
+        onClick={() => {
+          onRemove()
+          onClose()
+        }}
+        className="mt-2 flex w-full items-center gap-2 rounded px-1 py-1 text-left outline-none hover:bg-red-50"
+        style={{ color: '#dc2626' }}
+      >
+        <Trash2 className="size-4 shrink-0" style={{ color: '#dc2626' }} aria-hidden />
+        Delete image
+      </button>
+    </div>
+  )
+}
+
+interface Rect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+//crop selection laid over the full image. drag the interior to move, the
+//handles to resize, then confirm (Enter / ✓) or cancel (Esc / ✕)
+function CropOverlay({
+  fullW,
+  fullH,
+  initial,
+  onConfirm,
+  onCancel,
+}: {
+  fullW: number
+  fullH: number
+  initial: Rect
+  onConfirm: (r: Rect) => void
+  onCancel: () => void
+}) {
+  const [rect, setRect] = useState<Rect>(initial)
+  const rectRef = useRef(rect)
+  rectRef.current = rect
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel()
+      else if (e.key === 'Enter') onConfirm(rectRef.current)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onCancel, onConfirm])
+
+  //drag the interior to move the selection, clamped inside the image
+  function startMove(e: React.PointerEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    const el = e.currentTarget as HTMLElement
+    el.setPointerCapture(e.pointerId)
+    const s = { px: e.clientX, py: e.clientY, ...rect }
+    function move(ev: PointerEvent) {
+      const x = Math.min(fullW - s.w, Math.max(0, s.x + ev.clientX - s.px))
+      const y = Math.min(fullH - s.h, Math.max(0, s.y + ev.clientY - s.py))
+      setRect({ x, y, w: s.w, h: s.h })
+    }
+    function up(ev: PointerEvent) {
+      el.releasePointerCapture(ev.pointerId)
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', up)
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
+  }
+
+  //resize a single edge or corner, clamped to the image bounds and a min size
+  function startResize(e: React.PointerEvent, dir: ResizeDir) {
+    e.preventDefault()
+    e.stopPropagation()
+    const el = e.currentTarget as HTMLElement
+    el.setPointerCapture(e.pointerId)
+    const s = { px: e.clientX, py: e.clientY, ...rect }
+    function move(ev: PointerEvent) {
+      const dx = ev.clientX - s.px
+      const dy = ev.clientY - s.py
+      let { x, y, w, h } = s
+      if (dir.includes('w')) {
+        const nx = Math.min(s.x + s.w - MIN_IMG, Math.max(0, s.x + dx))
+        x = nx
+        w = s.x + s.w - nx
+      } else if (dir.includes('e')) {
+        w = Math.max(MIN_IMG, Math.min(fullW - s.x, s.w + dx))
+      }
+      if (dir.includes('n')) {
+        const ny = Math.min(s.y + s.h - MIN_IMG, Math.max(0, s.y + dy))
+        y = ny
+        h = s.y + s.h - ny
+      } else if (dir.includes('s')) {
+        h = Math.max(MIN_IMG, Math.min(fullH - s.y, s.h + dy))
+      }
+      setRect({ x, y, w, h })
+    }
+    function up(ev: PointerEvent) {
+      el.releasePointerCapture(ev.pointerId)
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', up)
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
+  }
+
+  return (
+    <div className="canvas-crop" onPointerDown={(e) => e.stopPropagation()}>
+      {/*dim everything outside the selection, clipped to the image*/}
+      <div className="canvas-crop-mask">
+        <div
+          className="canvas-crop-shade"
+          style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
+        />
+      </div>
+
+      <div
+        className="canvas-crop-rect"
+        style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
+        onPointerDown={startMove}
+      >
+        {HANDLES.map((hd) => (
+          <div
+            key={hd.dir}
+            className={`canvas-image-handle absolute ${hd.cls}`}
+            style={{ cursor: hd.cursor }}
+            onPointerDown={(e) => startResize(e, hd.dir)}
+            aria-hidden
+          />
+        ))}
+      </div>
+
+      <div className="canvas-crop-actions" style={{ left: rect.x, top: rect.y + rect.h + 8 }}>
+        <button className="is-confirm" onClick={() => onConfirm(rect)} title="apply crop (Enter), Esc to cancel">
+          <Check className="size-5" aria-hidden />
+        </button>
+      </div>
     </div>
   )
 }
