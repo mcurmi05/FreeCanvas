@@ -1,7 +1,17 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { EyeOff } from 'lucide-react'
 import { PageEditor } from '@/components/PageEditor'
+import { ImagePlus } from 'lucide-react'
+import { attachmentUrl } from '@/lib/attachments'
+import { importImage, isImage } from '@/lib/importFiles'
 import { validateName } from '@/lib/fs'
 import { DEFAULT_DOC_WIDTH, parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
 
@@ -10,6 +20,12 @@ interface Props {
   //the page's name, shown and edited in the title header
   pageName: string
   content: string
+  //the page's backing folder, where imported attachments live. undefined until
+  //the page is promoted to a folder on first import
+  pageDir?: FileSystemDirectoryHandle
+  //promote the page to a folder if needed and return its backing dir, used to
+  //land the first import
+  ensurePageDir: () => Promise<FileSystemDirectoryHandle | null>
   onSave: (html: string) => void | Promise<void>
   //rename the page when the title is edited, returns false on failure
   onRenamePage: (name: string) => Promise<boolean>
@@ -22,6 +38,8 @@ interface Props {
 //new boxes auto-size to their text and grow until this width, then wrap. once
 //the user drags the edge the box stores a fixed width and ignores this
 const BOX_MAX_W = 520
+//default on-canvas width for a freshly imported image, before any resize
+const DEFAULT_IMG_W = 360
 const SCROLL_PAD = 240
 //frame padding (.canvas-box-frame), subtracted on create so the caret lands
 //on the click point rather than offset by the padding
@@ -55,6 +73,8 @@ export function PageCanvas({
   pageKey,
   pageName,
   content,
+  pageDir,
+  ensurePageDir,
   onSave,
   onRenamePage,
   toggleTitleNonce,
@@ -119,6 +139,41 @@ export function PageCanvas({
   useEffect(() => {
     boxesRef.current = boxes
   }, [boxes])
+
+  //resolved object urls for media boxes, keyed by stored filename. kept in a ref
+  //so revoking on unmount is reliable, a counter bumps a re-render once a url lands
+  const mediaUrls = useRef<Map<string, string>>(new Map())
+  const [, bumpUrls] = useReducer((x: number) => x + 1, 0)
+
+  //resolve an object url for every image/attachment box that has a stored file
+  useEffect(() => {
+    if (!pageDir) return
+    let cancelled = false
+    const files = boxes
+      .filter((b) => (b.kind === 'image' || b.kind === 'attachment') && b.file)
+      .map((b) => b.file as string)
+    ;(async () => {
+      for (const file of files) {
+        if (mediaUrls.current.has(file)) continue
+        const url = await attachmentUrl(pageDir, file)
+        if (cancelled || !url) continue
+        mediaUrls.current.set(file, url)
+        bumpUrls()
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [boxes, pageDir])
+
+  //revoke every object url when the page unmounts so blobs do not leak
+  useEffect(
+    () => () => {
+      mediaUrls.current.forEach((u) => URL.revokeObjectURL(u))
+      mediaUrls.current.clear()
+    },
+    [],
+  )
   useEffect(() => {
     titleHiddenRef.current = titleHidden
   }, [titleHidden])
@@ -202,6 +257,15 @@ export function PageCanvas({
   }
 
   function removeBox(id: string) {
+    //revoke the box's object url if it had one, the stored file stays on disk
+    const box = boxesRef.current.find((b) => b.id === id)
+    if (box?.file) {
+      const url = mediaUrls.current.get(box.file)
+      if (url) {
+        URL.revokeObjectURL(url)
+        mediaUrls.current.delete(box.file)
+      }
+    }
     delete boxHtml.current[id]
     setBoxes((bs) => bs.filter((b) => b.id !== id))
     scheduleSave()
@@ -210,6 +274,62 @@ export function PageCanvas({
   function onBoxInput(id: string, html: string) {
     boxHtml.current[id] = html
     scheduleSave()
+  }
+
+  //convert a viewport point into canvas content coordinates, matching the
+  //create-box math so a dropped file lands under the pointer
+  function contentPoint(clientX: number, clientY: number) {
+    if (!contentEl) return { x: 0, y: 0 }
+    const rect = contentEl.getBoundingClientRect()
+    return {
+      x: clientX - rect.left + contentEl.scrollLeft - BOX_PAD_X,
+      y: clientY - rect.top + contentEl.scrollTop - BOX_PAD_Y,
+    }
+  }
+
+  //import dropped or picked files onto the canvas. images insert silently as
+  //image boxes, stacked with a small offset when several arrive at once
+  async function importFiles(files: FileList | File[], x: number, y: number) {
+    const list = Array.from(files)
+    if (!list.length) return
+    //first import promotes a leaf page to a folder so it can hold attachments
+    const dir = pageDir ?? (await ensurePageDir())
+    if (!dir) return
+    let offset = 0
+    for (const file of list) {
+      if (isImage(file)) {
+        const box = await importImage(dir, file, Math.max(0, x + offset), Math.max(0, y + offset))
+        setBoxes((bs) => [...bs, box])
+        scheduleSave()
+        offset += 24
+      }
+      //non-image files get an attachment/printout prompt in a later step
+    }
+  }
+
+  //the toolbar import button feeds files through a hidden picker
+  const fileInput = useRef<HTMLInputElement>(null)
+  function onPickFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files
+    if (files?.length) {
+      //land picked files near the top-left of the current view
+      const x = (contentEl?.scrollLeft ?? 0) + 80
+      const y = (contentEl?.scrollTop ?? 0) + 140
+      importFiles(files, x, y)
+    }
+    e.target.value = ''
+  }
+
+  function onDrop(e: React.DragEvent) {
+    if (!e.dataTransfer.files.length) return
+    e.preventDefault()
+    const { x, y } = contentPoint(e.clientX, e.clientY)
+    importFiles(e.dataTransfer.files, x, y)
+  }
+
+  function onDragOver(e: React.DragEvent) {
+    //only intercept file drags, leave internal drags to their own handlers
+    if (Array.from(e.dataTransfer.types).includes('Files')) e.preventDefault()
   }
 
   //right-click the marker to reset the document to the default (A4) width
@@ -333,22 +453,44 @@ export function PageCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [titleHidden])
 
-  //grow the scroll area so boxes dragged outward extend the canvas
-  const extent = boxes.reduce(
-    (acc, b) => ({
-      w: Math.max(acc.w, b.x + (b.w ?? BOX_MAX_W) + SCROLL_PAD),
-      h: Math.max(acc.h, b.y + 80 + SCROLL_PAD),
-    }),
-    { w: 0, h: 0 },
-  )
+  //grow the scroll area so boxes dragged outward extend the canvas. an image
+  //box can be tall, estimate its height from its width and aspect ratio
+  const extent = boxes.reduce((acc, b) => {
+    const w = b.w ?? (b.kind === 'image' ? DEFAULT_IMG_W : BOX_MAX_W)
+    const h = b.kind === 'image' && b.aspect ? w / b.aspect : 80
+    return {
+      w: Math.max(acc.w, b.x + w + SCROLL_PAD),
+      h: Math.max(acc.h, b.y + h + SCROLL_PAD),
+    }
+  }, { w: 0, h: 0 })
 
   return (
     <div
       ref={wrapper}
       className="editor-fill relative min-h-0 flex-1"
       style={{ '--doc-w': `${docW}px` } as CSSProperties}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
     >
       <PageEditor key={pageKey} content={docHtml.current} onSave={onDocChange} />
+
+      {/*hidden picker + floating import button, top-right of the canvas*/}
+      <input
+        ref={fileInput}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={onPickFiles}
+      />
+      <button
+        type="button"
+        onClick={() => fileInput.current?.click()}
+        className="absolute right-4 top-3 z-20 flex items-center gap-1.5 rounded-md border border-border bg-background/90 px-2.5 py-1.5 text-sm shadow-sm outline-none hover:bg-accent"
+        title="import images or files onto this page"
+      >
+        <ImagePlus className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Import
+      </button>
 
       {contentEl &&
         createPortal(
@@ -412,18 +554,28 @@ export function PageCanvas({
               className="pointer-events-none absolute left-0 top-0 z-10"
               style={{ width: extent.w || undefined, height: extent.h || undefined }}
             >
-              {boxes.map((b) => (
-                <Box
-                  key={b.id}
-                  box={b}
-                  autoFocus={b.id === focusId}
-                  initialHtml={boxHtml.current[b.id] ?? b.html}
-                  onInput={(html) => onBoxInput(b.id, html)}
-                  onMove={(x, y) => updateBox(b.id, { x, y })}
-                  onResize={(w) => updateBox(b.id, { w })}
-                  onRemove={() => removeBox(b.id)}
-                />
-              ))}
+              {boxes.map((b) =>
+                b.kind === 'image' ? (
+                  <ImageBox
+                    key={b.id}
+                    box={b}
+                    url={b.file ? mediaUrls.current.get(b.file) : undefined}
+                    onMove={(x, y) => updateBox(b.id, { x, y })}
+                    onResize={(w) => updateBox(b.id, { w })}
+                  />
+                ) : (
+                  <Box
+                    key={b.id}
+                    box={b}
+                    autoFocus={b.id === focusId}
+                    initialHtml={boxHtml.current[b.id] ?? b.html}
+                    onInput={(html) => onBoxInput(b.id, html)}
+                    onMove={(x, y) => updateBox(b.id, { x, y })}
+                    onResize={(w) => updateBox(b.id, { w })}
+                    onRemove={() => removeBox(b.id)}
+                  />
+                ),
+              )}
             </div>
           </>,
           contentEl,
@@ -484,6 +636,92 @@ interface BoxProps {
   onMove: (x: number, y: number) => void
   onResize: (w: number) => void
   onRemove: () => void
+}
+
+//shared pointer drag: move the box, clamped to the positive canvas
+function dragBox(
+  e: React.PointerEvent,
+  box: BoxMeta,
+  onMove: (x: number, y: number) => void,
+) {
+  e.preventDefault()
+  const start = { px: e.clientX, py: e.clientY, x: box.x, y: box.y }
+  const el = e.currentTarget as HTMLElement
+  el.setPointerCapture(e.pointerId)
+  document.body.style.cursor = 'move'
+  function move(ev: PointerEvent) {
+    onMove(
+      Math.max(0, start.x + ev.clientX - start.px),
+      Math.max(0, start.y + ev.clientY - start.py),
+    )
+  }
+  function up(ev: PointerEvent) {
+    el.releasePointerCapture(ev.pointerId)
+    el.removeEventListener('pointermove', move)
+    el.removeEventListener('pointerup', up)
+    document.body.style.cursor = ''
+  }
+  el.addEventListener('pointermove', move)
+  el.addEventListener('pointerup', up)
+}
+
+//a non-editable image dropped on the canvas, drag to move, drag the right edge
+//to resize. height follows the natural aspect so resizing stays locked
+function ImageBox({
+  box,
+  url,
+  onMove,
+  onResize,
+}: {
+  box: BoxMeta
+  url?: string
+  onMove: (x: number, y: number) => void
+  onResize: (w: number) => void
+}) {
+  const width = box.w ?? DEFAULT_IMG_W
+
+  function startResize(e: React.PointerEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    const el = e.currentTarget as HTMLElement
+    const start = { px: e.clientX, w: width }
+    el.setPointerCapture(e.pointerId)
+    function move(ev: PointerEvent) {
+      onResize(Math.max(40, start.w + ev.clientX - start.px))
+    }
+    function up(ev: PointerEvent) {
+      el.releasePointerCapture(ev.pointerId)
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', up)
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
+  }
+
+  return (
+    <div
+      className="canvas-box canvas-image group"
+      style={{ left: box.x, top: box.y, width }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <div className="canvas-image-frame" onPointerDown={(e) => dragBox(e, box, onMove)}>
+        {url ? (
+          <img src={url} alt={box.name ?? ''} draggable={false} />
+        ) : (
+          //placeholder box sized by aspect while the object url resolves
+          <div
+            className="canvas-image-loading"
+            style={{ aspectRatio: box.aspect || 1 }}
+          />
+        )}
+      </div>
+      <div
+        onPointerDown={startResize}
+        className="absolute -right-1 top-0 h-full w-2 cursor-ew-resize opacity-0 group-hover:opacity-100"
+        aria-hidden
+      />
+    </div>
+  )
 }
 
 //a single draggable, editable text container

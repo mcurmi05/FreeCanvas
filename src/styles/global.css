@@ -355,3 +355,30 @@
   box-shadow: 0 0 0 2px #9ca3af;
 }
 
+/*image boxes: the whole frame is the drag handle, the image fills its width and
+  scales by aspect. grey ring on hover hints it is selectable/draggable*/
+.canvas-image-frame {
+  cursor: move;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px transparent;
+  transition: box-shadow 0.12s ease;
+}
+
+.canvas-image:hover .canvas-image-frame {
+  box-shadow: 0 0 0 2px #9ca3af;
+}
+
+.canvas-image-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+}
+
+/*neutral placeholder shown while the object url resolves*/
+.canvas-image-loading {
+  width: 100%;
+  background: #f3f4f6;
+}
+

@@ -76,6 +76,7 @@ export function NotebookScreen() {
   const [confirm, setConfirm] = useState<PageNode | null>(null)
   const [rename, setRename] = useState<PageNode | null>(null)
   const renameNode = useAppStore((s) => s.renameNode)
+  const promoteActivePageToFolder = useAppStore((s) => s.promoteActivePageToFolder)
   const [draggingPath, setDraggingPath] = useState<string | null>(null)
   //bumped to ask the active page's canvas to flip the title shown/hidden, plus
   //the title's current visibility so the menu can label show vs hide
@@ -269,6 +270,8 @@ export function NotebookScreen() {
             pageKey={activePage.path}
             pageName={activePage.name}
             content={pageContent}
+            pageDir={activePage.dirHandle}
+            ensurePageDir={promoteActivePageToFolder}
             onSave={savePage}
             onRenamePage={(name) => renameNode(activePage.path, name)}
             toggleTitleNonce={toggleTitleNonce}
