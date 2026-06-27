@@ -10,6 +10,10 @@ export const INDEX_FILE = 'index' + PAGE_EXT
 //each folder remembers the order of its children here, a json array of disk names
 export const ORDER_FILE = '.order'
 
+//reserved subfolder name where a page keeps its imported images and files
+//never shown in the sidebar, lives beside the page's index.html
+export const ATTACHMENTS_DIR = 'attachments'
+
 //the on disk name for a node, leaf pages carry the extension, folders do not
 export function diskName(node: PageNode): string {
   return node.dirHandle ? node.name : node.name + PAGE_EXT
@@ -175,6 +179,8 @@ export async function listPageTree(
   const files: [string, FileSystemFileHandle][] = []
   for await (const [name, handle] of dir.entries()) {
     if (handle.kind === 'directory') {
+      //the attachments folder backs a page's imported files, not a child page
+      if (name === ATTACHMENTS_DIR) continue
       dirs.push([name, handle])
     } else if (name.endsWith(PAGE_EXT) && name !== INDEX_FILE) {
       files.push([name, handle as FileSystemFileHandle])

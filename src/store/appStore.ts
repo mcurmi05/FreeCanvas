@@ -83,6 +83,9 @@ interface AppState {
   openPage: (page: PageNode) => Promise<void>
   //persist the current page html
   savePage: (html: string) => Promise<void>
+  //ensure the active page is backed by a folder so it can hold attachments,
+  //promoting a leaf page on first import. returns the backing folder or null
+  promoteActivePageToFolder: () => Promise<FileSystemDirectoryHandle | null>
 }
 
 //find a node anywhere in the tree by its path
@@ -518,6 +521,26 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ pageContent: html, saveState: 'saved' })
     } catch (err) {
       set({ saveState: 'idle', error: (err as Error).message })
+    }
+  },
+
+  promoteActivePageToFolder: async () => {
+    const notebook = get().activeNotebook
+    const page = get().activePage
+    if (!notebook || !page) return null
+    //already a folder, hand back its backing directory unchanged
+    if (page.dirHandle) return page.dirHandle
+    try {
+      const dir = await promotePageToDir(notebook.handle, page)
+      //reload the tree and re-point the active page at its promoted node so it
+      //now carries a dirHandle, the sidebar simply gains an expand affordance
+      const pageTree = await listPageTree(notebook.handle)
+      const refreshed = findNode(pageTree, page.path)
+      set({ pageTree, activePage: refreshed ?? page })
+      return dir
+    } catch (err) {
+      set({ error: (err as Error).message })
+      return null
     }
   },
 }))
