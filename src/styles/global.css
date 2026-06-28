@@ -475,10 +475,23 @@
   display: flex;
 }
 
+/*clip that animates its width on toggle; the rail inside keeps its full width so
+  the previews slide in/out instead of squishing (mirrors the page sidebar)*/
+.canvas-pdf-thumbs-wrap {
+  flex: 0 0 auto;
+  width: 0;
+  overflow: hidden;
+  transition: width 200ms ease-out;
+}
+
+.canvas-pdf-thumbs-wrap.is-open {
+  width: 124px;
+}
+
 /*thumbnail rail: scrollable column of page previews*/
 .canvas-pdf-thumbs {
-  flex: 0 0 auto;
   width: 124px;
+  height: 100%;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -533,6 +546,9 @@
 .canvas-pdf-slide {
   flex: 1;
   min-height: 0;
+  /*let the viewer shrink below the page's width so it makes room for the rail
+    (the pages then reflow narrower) instead of overflowing*/
+  min-width: 0;
   display: flex;
   overflow: auto;
   background: #f3f4f6;
@@ -549,13 +565,61 @@
 .canvas-pdf-scroll {
   flex: 1;
   min-height: 0;
+  /*let the viewer shrink below the pages' width so it makes room for the rail
+    (the pages then reflow narrower) instead of overflowing*/
+  min-width: 0;
   overflow: auto;
+  /*always reserve the scrollbar gutter so the content width (and therefore each
+    page's height) doesn't change when the bar shows/hides. without this, fitting
+    the window to the content height oscillates: hiding the bar widens the pages,
+    which re-overflows and brings the bar back, and so on*/
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  padding: 10px;
+  /*extra left room so each page's number sits in the margin to its left*/
+  padding: 10px 10px 10px 44px;
   background: #f3f4f6;
+}
+
+/*page number in the scroll viewer's left margin, centred on its page*/
+.canvas-pdf-page-tag {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-right: 10px;
+  padding: 1px 4px;
+  border-radius: 5px;
+  font-size: 0.8rem;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  pointer-events: none;
+}
+
+/*briefly highlight the number after jumping to its page from the sidebar*/
+.canvas-pdf-page-tag.is-flash {
+  animation: pdf-tag-flash 1.3s ease-out both;
+}
+
+@keyframes pdf-tag-flash {
+  0% {
+    color: #6b7280;
+    background: transparent;
+    transform: translateY(-50%) scale(1);
+  }
+  18% {
+    color: #1d4ed8;
+    background: rgba(37, 99, 235, 0.16);
+    transform: translateY(-50%) scale(1.35);
+  }
+  100% {
+    color: #6b7280;
+    background: transparent;
+    transform: translateY(-50%) scale(1);
+  }
 }
 
 /*each page slot reserves its height (set inline from the aspect ratio) so the
@@ -860,5 +924,40 @@
 
 .canvas-crop-actions button.is-confirm:hover {
   background: #1d4ed8;
+}
+
+/*save indicator: ring pops in then the check strokes itself on*/
+@keyframes save-check-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes save-check-draw {
+  from {
+    stroke-dashoffset: 22;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.save-check-pop {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: save-check-pop 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.save-check-draw {
+  stroke-dasharray: 22;
+  animation: save-check-draw 0.32s ease-out 0.06s both;
 }
 

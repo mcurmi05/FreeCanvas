@@ -2145,6 +2145,9 @@ function PdfBox({
   const ref = useRef<HTMLDivElement>(null)
   //the title bar, measured so height snaps account for it
   const barRef = useRef<HTMLDivElement>(null)
+  //the scroll viewer node, so "extend to whole pdf" can read its exact rendered
+  //content height rather than re-deriving it from aspect ratios
+  const scrollViewRef = useRef<HTMLDivElement | null>(null)
   //the slideshow page-number field, focused when either number is clicked
   const pageInputRef = useRef<HTMLInputElement>(null)
   //true once a bar drag actually moved, so a click that ends a drag doesn't also
@@ -2171,11 +2174,38 @@ function PdfBox({
   const slideCountRef = useRef(0)
   //thumbnail sidebar open, and the editable page-number field's draft text
   const [sidebar, setSidebar] = useState(false)
+  //keep the rail mounted through the close animation so its content slides out
+  //under the clip instead of vanishing, the way the page sidebar does
+  const [sidebarMounted, setSidebarMounted] = useState(false)
+  useEffect(() => {
+    if (sidebar) {
+      setSidebarMounted(true)
+      return
+    }
+    const t = setTimeout(() => setSidebarMounted(false), 220)
+    return () => clearTimeout(t)
+  }, [sidebar])
+  //hold off rasterizing thumbnails until the open animation has finished, so the
+  //burst of canvas renders doesn't compete with the slide and jank it. the rail
+  //shows cheap placeholders while it slides in, then fills
+  const [thumbReady, setThumbReady] = useState(false)
+  useEffect(() => {
+    if (!sidebar) {
+      setThumbReady(false)
+      return
+    }
+    const t = setTimeout(() => setThumbReady(true), 230)
+    return () => clearTimeout(t)
+  }, [sidebar])
   const [pageInput, setPageInput] = useState('1')
   //slideshow zoom: 1 fits the window, >1 overflows (pannable). the last rendered
   //page's css size is kept so "fit one page" can size the window to it
   const [slideZoom, setSlideZoom] = useState(1)
   const pageSizeRef = useRef<{ w: number; h: number } | null>(null)
+  //true while the window is snugly sized to the whole pdf ("extend to whole pdf").
+  //toggling the sidebar changes the page width (and so the total height), so we
+  //re-fit to stay snug; cleared by anything that breaks the snug fit
+  const extendedRef = useRef(false)
   const slides = box.mode === 'slides'
   const w = box.w ?? DEFAULT_PDF_W
   const h = box.h ?? DEFAULT_PDF_W
@@ -2206,6 +2236,8 @@ function PdfBox({
     setPageInput(String(clamped))
   }
   function zoomBy(factor: number) {
+    //zooming changes the page height, so the window is no longer snug to the pdf
+    extendedRef.current = false
     setSlideZoom((z) => Math.min(6, Math.max(0.5, z * factor)))
   }
 
@@ -2284,6 +2316,8 @@ function PdfBox({
   function startResize(e: React.PointerEvent, dir: ResizeDir) {
     e.preventDefault()
     e.stopPropagation()
+    //a manual resize breaks the snug-to-pdf fit
+    extendedRef.current = false
     ref.current?.focus({ preventScroll: true })
     onGeomBegin()
     setInteracting(true)
@@ -2327,12 +2361,30 @@ function PdfBox({
     //add the thumbnail rail's width when it's open so the page area still fits
     const ps = pageSizeRef.current
     if (!ps) return
+    //one page, not the whole pdf
+    extendedRef.current = false
     const side = sidebar ? PDF_SIDEBAR_W : 0
     onGeomBegin()
-    //scroll also adds the viewer's 10px top+bottom + left+right padding so the
-    //page isn't clipped; the slide stage has no padding
-    if (slides) onGeom({ w: Math.round(ps.w + side), h: Math.round(barH + ps.h) })
-    else onGeom({ w: Math.round(ps.w + 20 + side), h: Math.round(barH + ps.h + 20) })
+    if (slides) {
+      //the slide stage has no padding
+      onGeom({ w: Math.round(ps.w + side), h: Math.round(barH + ps.h) })
+    } else {
+      //size so the viewer's content area is exactly one page. measure the viewer's
+      //real horizontal chrome (padding + the reserved scrollbar gutter) rather than
+      //hardcoding it, otherwise the gutter is missed and the page shrinks a little
+      //on every click. vertical chrome is just the 10+10 padding (gap, slide, gap)
+      const view = scrollViewRef.current
+      let chromeX = 54
+      let chromeY = 20
+      if (view) {
+        const cs = getComputedStyle(view)
+        const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+        const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+        chromeX = padX + (view.offsetWidth - view.clientWidth)
+        chromeY = padY
+      }
+      onGeom({ w: Math.round(ps.w + chromeX + side), h: Math.round(barH + ps.h + chromeY) })
+    }
     onGeomCommit()
     //the window now wraps the page at its current on-screen size, so normalise
     //zoom to 1 (= fills the new width). without this the old zoom stays relative
@@ -2340,20 +2392,53 @@ function PdfBox({
     setSlideZoom(1)
   }
 
-  //extend the bottom so the window is tall enough to show the whole pdf, every
-  //page fits to the window width so stack their scaled heights
+  //extend the bottom so the window is tall enough to show the whole pdf. measure
+  //the viewer's actual rendered content (every slot already reserves its height,
+  //plus the real gaps and padding) instead of re-deriving from aspect ratios,
+  //which left a blank tail. fall back to the aspect estimate if the viewer node
+  //isn't available
   async function fitWholePdf() {
     if (!url) return
+    const barH = barRef.current?.clientHeight ?? 32
+    const view = scrollViewRef.current
+    if (view) {
+      onGeomBegin()
+      onGeom({ h: Math.round(barH + view.scrollHeight) })
+      onGeomCommit()
+      //stay snug to the pdf across later sidebar toggles
+      extendedRef.current = true
+      return
+    }
     const data = await fetch(url).then((r) => r.arrayBuffer())
     const { pageAspects } = await import('@/lib/pdfPrintout')
     const aspects = await pageAspects(data)
     if (!aspects.length) return
-    const barH = barRef.current?.clientHeight ?? 32
-    const total = aspects.reduce((sum, a) => sum + w / a, 0)
+    const side = sidebar ? PDF_SIDEBAR_W : 0
+    //viewer padding is 44 left + 10 right
+    const pageW = w - 54 - side
+    const pagesH = aspects.reduce((sum, a) => sum + pageW / a, 0)
+    const gaps = 10 * Math.max(0, aspects.length - 1)
     onGeomBegin()
-    onGeom({ h: Math.round(barH + total) })
+    onGeom({ h: Math.round(barH + pagesH + gaps + 20) })
     onGeomCommit()
   }
+
+  //when extended to the whole pdf, a sidebar toggle changes the page width and so
+  //the total height; re-fit once the rail animation and re-layout have settled so
+  //the window stays snug instead of leaving a tail (or clipping)
+  useEffect(() => {
+    if (!extendedRef.current) return
+    const t = setTimeout(() => {
+      const view = scrollViewRef.current
+      if (!view) return
+      const barH = barRef.current?.clientHeight ?? 32
+      onGeomBegin()
+      onGeom({ h: Math.round(barH + view.scrollHeight) })
+      onGeomCommit()
+    }, 260)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebar])
 
   return (
     <div
@@ -2497,6 +2582,8 @@ function PdfBox({
           page={slidePage}
           zoom={slideZoom}
           sidebar={sidebar}
+          sidebarRender={sidebarMounted}
+          thumbReady={thumbReady}
           onCount={onSlideCount}
           onZoom={zoomBy}
           onPageSize={(pw, ph) => (pageSizeRef.current = { w: pw, h: ph })}
@@ -2508,8 +2595,11 @@ function PdfBox({
         //iframe viewer exposed none of that and crashed on teardown)
         <PdfScroll
           url={url}
+          viewRef={scrollViewRef}
           zoom={slideZoom}
           sidebar={sidebar}
+          sidebarRender={sidebarMounted}
+          thumbReady={thumbReady}
           interacting={interacting}
           onCount={onSlideCount}
           onZoom={zoomBy}
@@ -2615,6 +2705,8 @@ function PdfSlides({
   page,
   zoom,
   sidebar,
+  sidebarRender,
+  thumbReady,
   onCount,
   onZoom,
   onPageSize,
@@ -2624,6 +2716,10 @@ function PdfSlides({
   page: number
   zoom: number
   sidebar: boolean
+  //rail stays mounted briefly after close so it can slide out
+  sidebarRender: boolean
+  //thumbnails only rasterize once true (after the open animation)
+  thumbReady: boolean
   onCount: (n: number) => void
   onZoom: (factor: number) => void
   onPageSize: (w: number, h: number) => void
@@ -2734,19 +2830,22 @@ function PdfSlides({
           <div className="canvas-image-loading" />
         )}
       </div>
-      {sidebar && ready && pdfRef.current && (
-        <div className="canvas-pdf-thumbs">
-          {Array.from({ length: count }, (_, i) => i + 1).map((n) => (
-            <PdfThumb
-              key={n}
-              pdf={pdfRef.current!}
-              num={n}
-              active={n === page}
-              onClick={() => onJump(n)}
-            />
-          ))}
-        </div>
-      )}
+      <div className={`canvas-pdf-thumbs-wrap${sidebar ? ' is-open' : ''}`}>
+        {sidebarRender && ready && pdfRef.current && (
+          <div className="canvas-pdf-thumbs">
+            {Array.from({ length: count }, (_, i) => i + 1).map((n) => (
+              <PdfThumb
+                key={n}
+                pdf={pdfRef.current!}
+                num={n}
+                active={n === page}
+                ready={thumbReady}
+                onClick={() => onJump(n)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -2757,23 +2856,32 @@ function PdfSlides({
 //on teardown. pages render lazily as they near the viewport so big decks stay cheap
 function PdfScroll({
   url,
+  viewRef,
   zoom,
   sidebar,
+  sidebarRender,
+  thumbReady,
   interacting,
   onCount,
   onZoom,
   onPageSize,
 }: {
   url?: string
+  //mirrors the scroll node up to the parent so "extend to whole pdf" can measure it
+  viewRef?: React.MutableRefObject<HTMLDivElement | null>
   zoom: number
   sidebar: boolean
+  //rail stays mounted briefly after close so it can slide out
+  sidebarRender: boolean
+  //thumbnails only rasterize once true (after the open animation)
+  thumbReady: boolean
   //while the window is being dragged/resized the viewer must not eat the gesture
   interacting: boolean
   onCount: (n: number) => void
   onZoom: (factor: number) => void
   onPageSize: (cssW: number, cssH: number) => void
 }) {
-  const wrapRef = useRef<HTMLDivElement>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   const pdfRef = useRef<PDFDocumentProxy | null>(null)
   const taskRef = useRef<PDFDocumentLoadingTask | null>(null)
   const slotRefs = useRef<(HTMLDivElement | null)[]>([])
@@ -2783,8 +2891,26 @@ function PdfScroll({
   const [aspects, setAspects] = useState<number[]>([])
   //the page-area content width (zoom 1 fills it); pages render at width * zoom
   const [width, setWidth] = useState(0)
+  //the width the canvases actually rasterize at. it lags `width` so the heavy
+  //per-page re-render doesn't fire on every frame while the rail animates the
+  //viewer's width; slots keep using the live width and the bitmap just scales
+  //until this settles, then repaints crisp
+  const [renderWidth, setRenderWidth] = useState(0)
+  const renderInited = useRef(false)
+  useEffect(() => {
+    if (width < 2) return
+    if (!renderInited.current) {
+      renderInited.current = true
+      setRenderWidth(width)
+      return
+    }
+    const t = setTimeout(() => setRenderWidth(width), 160)
+    return () => clearTimeout(t)
+  }, [width])
   //the most-visible page, drives the active thumbnail and the fit-one-page size
   const [current, setCurrent] = useState(1)
+  //the page whose number is briefly flashing after a jump, with a restart nonce
+  const [flash, setFlash] = useState<{ page: number; nonce: number } | null>(null)
 
   //track the page area's content width (client width minus padding)
   useEffect(() => {
@@ -2918,13 +3044,34 @@ function PdfScroll({
   }, [zoom, width])
 
   function jump(n: number) {
-    slotRefs.current[n - 1]?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    const el = wrapRef.current
+    const s = slotRefs.current[n - 1]
+    if (!el || !s) return
+    //flash the page number so it's easy to spot where we landed (nonce restarts
+    //the animation even when the same page is picked again)
+    setFlash({ page: n, nonce: Date.now() })
+    //when the viewer scrolls internally, scroll only it (not scrollIntoView,
+    //which would also move the note page), instantly, with the slide centred.
+    //measure via rects so it's correct regardless of the slot's offsetParent
+    if (el.scrollHeight - el.clientHeight > 1) {
+      const er = el.getBoundingClientRect()
+      const sr = s.getBoundingClientRect()
+      const delta = sr.top - er.top + sr.height / 2 - el.clientHeight / 2
+      el.scrollTop += delta
+      return
+    }
+    //extended to the whole pdf: the viewer has no scroll, so centre the slide in
+    //the note page's visible area (block:'center' centres it in the scrollport)
+    s.scrollIntoView({ block: 'center' })
   }
 
   return (
     <div className="canvas-pdf-stage">
       <div
-        ref={wrapRef}
+        ref={(el) => {
+          wrapRef.current = el
+          if (viewRef) viewRef.current = el
+        }}
         className="canvas-pdf-scroll"
         style={interacting ? { pointerEvents: 'none' } : undefined}
         onScroll={onScroll}
@@ -2939,26 +3086,31 @@ function PdfScroll({
               pdf={pdfRef.current!}
               num={i + 1}
               width={width * zoom}
+              renderWidth={renderWidth * zoom}
               aspect={a}
+              flash={flash?.page === i + 1 ? flash.nonce : 0}
             />
           ))
         ) : (
           <div className="canvas-image-loading" />
         )}
       </div>
-      {sidebar && ready && pdfRef.current && (
-        <div className="canvas-pdf-thumbs">
-          {aspects.map((_, i) => (
-            <PdfThumb
-              key={i}
-              pdf={pdfRef.current!}
-              num={i + 1}
-              active={i + 1 === current}
-              onClick={() => jump(i + 1)}
-            />
-          ))}
-        </div>
-      )}
+      <div className={`canvas-pdf-thumbs-wrap${sidebar ? ' is-open' : ''}`}>
+        {sidebarRender && ready && pdfRef.current && (
+          <div className="canvas-pdf-thumbs">
+            {aspects.map((_, i) => (
+              <PdfThumb
+                key={i}
+                pdf={pdfRef.current!}
+                num={i + 1}
+                active={i + 1 === current}
+                ready={thumbReady}
+                onClick={() => jump(i + 1)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -2969,8 +3121,18 @@ function PdfScroll({
 //can observe and scroll to it
 const PdfPage = forwardRef<
   HTMLDivElement,
-  { pdf: PDFDocumentProxy; num: number; width: number; aspect: number }
->(function PdfPage({ pdf, num, width, aspect }, ref) {
+  {
+    pdf: PDFDocumentProxy
+    num: number
+    //live width drives the slot box (cheap, scales every frame)
+    width: number
+    //lagged width the bitmap rasterizes at, so heavy renders don't fire per frame
+    renderWidth: number
+    aspect: number
+    //nonzero (a nonce) while this page's number should flash after a jump
+    flash: number
+  }
+>(function PdfPage({ pdf, num, width, renderWidth, aspect, flash }, ref) {
   const innerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const textRef = useRef<HTMLDivElement>(null)
@@ -2994,9 +3156,11 @@ const PdfPage = forwardRef<
     return () => io.disconnect()
   }, [shown])
 
-  //(re)paint at the target css width whenever it (the zoom) changes
+  //(re)paint at the settled css width. uses renderWidth (lagged) so it doesn't
+  //re-raster every frame while the rail animates; the canvas is stretched to the
+  //live slot width meanwhile so the page still scales smoothly
   useEffect(() => {
-    if (!shown || width < 2) return
+    if (!shown || renderWidth < 2) return
     const canvas = canvasRef.current
     if (!canvas) return
     let cancelled = false
@@ -3010,7 +3174,7 @@ const PdfPage = forwardRef<
           pdf,
           num,
           canvas,
-          width,
+          renderWidth,
           1e6,
           1,
           textRef.current ?? undefined,
@@ -3018,6 +3182,11 @@ const PdfPage = forwardRef<
         task = res.task
         textLayer = res.textLayer
         await task.promise
+        if (cancelled) return
+        //fill the slot so the bitmap scales to the live width during animation,
+        //overriding the explicit px size renderPdfPage set
+        canvas.style.width = '100%'
+        canvas.style.height = '100%'
       } catch {
         //superseded/cancelled render rejects, ignore
       }
@@ -3027,7 +3196,7 @@ const PdfPage = forwardRef<
       task?.cancel()
       textLayer?.cancel()
     }
-  }, [shown, pdf, num, width])
+  }, [shown, pdf, num, renderWidth])
 
   return (
     <div
@@ -3037,6 +3206,14 @@ const PdfPage = forwardRef<
       //reserve the page's height before it paints so scroll position is stable
       style={{ width, height: width / aspect }}
     >
+      {/*page number sitting in the left margin, vertically centred on the page.
+         the nonce key restarts the flash animation on each jump to this page*/}
+      <span
+        key={flash}
+        className={`canvas-pdf-page-tag${flash ? ' is-flash' : ''}`}
+      >
+        {num}
+      </span>
       {shown && (
         <>
           <canvas ref={canvasRef} className="canvas-pdf-page-canvas" />
@@ -3055,11 +3232,15 @@ function PdfThumb({
   pdf,
   num,
   active,
+  ready,
   onClick,
 }: {
   pdf: PDFDocumentProxy
   num: number
   active: boolean
+  //gate raster until the rail's open animation is done so the render burst
+  //doesn't jank the slide
+  ready: boolean
   onClick: () => void
 }) {
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -3083,7 +3264,7 @@ function PdfThumb({
   }, [shown])
 
   useEffect(() => {
-    if (!shown) return
+    if (!shown || !ready) return
     const canvas = canvasRef.current
     if (!canvas) return
     let task: RenderTask | null = null
@@ -3098,7 +3279,7 @@ function PdfThumb({
       }
     })()
     return () => task?.cancel()
-  }, [shown, pdf, num])
+  }, [shown, ready, pdf, num])
 
   useEffect(() => {
     if (active) btnRef.current?.scrollIntoView({ block: 'nearest' })
@@ -3113,7 +3294,7 @@ function PdfThumb({
       onMouseDown={(e) => e.preventDefault()}
       onClick={onClick}
     >
-      {shown ? (
+      {shown && ready ? (
         <canvas ref={canvasRef} className="canvas-pdf-thumb-canvas" />
       ) : (
         <div className="canvas-pdf-thumb-ph" />
