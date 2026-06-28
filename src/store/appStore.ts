@@ -81,8 +81,13 @@ interface AppState {
   renameNode: (path: string, newName: string) => Promise<boolean>
   //open a page and load its html
   openPage: (page: PageNode) => Promise<void>
-  //persist the current page html
-  savePage: (html: string) => Promise<void>
+  //persist a page's html. pass the page the html belongs to so a debounced save
+  //that lands after a page switch writes the right file, not whatever is active
+  //now. defaults to the active page for direct callers
+  savePage: (html: string, page?: PageNode) => Promise<void>
+  //ensure the active page is backed by a folder so it can hold attachments,
+  //promoting a leaf page on first import. returns the backing folder or null
+  promoteActivePageToFolder: () => Promise<FileSystemDirectoryHandle | null>
 }
 
 //find a node anywhere in the tree by its path
@@ -509,15 +514,42 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  savePage: async (html) => {
-    const page = get().activePage
+  savePage: async (html, page = get().activePage ?? undefined) => {
     if (!page?.fileHandle) return
-    set({ saveState: 'saving' })
+    //never resurrect a page that's been deleted or renamed away: a debounced or
+    //unmount-flush save can fire after the node is gone from the tree, and
+    //writing its handle would recreate the file on disk
+    if (!findNode(get().pageTree, page.path)) return
+    //only touch shared ui state (content echo, save badge) while this page is
+    //still the active one. a save flushed after a switch must write its own file
+    //but must not stomp the now-visible page's content or save indicator
+    const stillActive = () => get().activePage?.path === page.path
+    if (stillActive()) set({ saveState: 'saving' })
     try {
       await writePage(page.fileHandle, html)
-      set({ pageContent: html, saveState: 'saved' })
+      if (stillActive()) set({ pageContent: html, saveState: 'saved' })
     } catch (err) {
-      set({ saveState: 'idle', error: (err as Error).message })
+      if (stillActive()) set({ saveState: 'idle', error: (err as Error).message })
+    }
+  },
+
+  promoteActivePageToFolder: async () => {
+    const notebook = get().activeNotebook
+    const page = get().activePage
+    if (!notebook || !page) return null
+    //already a folder, hand back its backing directory unchanged
+    if (page.dirHandle) return page.dirHandle
+    try {
+      const dir = await promotePageToDir(notebook.handle, page)
+      //reload the tree and re-point the active page at its promoted node so it
+      //now carries a dirHandle, the sidebar simply gains an expand affordance
+      const pageTree = await listPageTree(notebook.handle)
+      const refreshed = findNode(pageTree, page.path)
+      set({ pageTree, activePage: refreshed ?? page })
+      return dir
+    } catch (err) {
+      set({ error: (err as Error).message })
+      return null
     }
   },
 }))

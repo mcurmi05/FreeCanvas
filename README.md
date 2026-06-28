@@ -19,6 +19,11 @@ An offline first PWA notebook. A OneNote style infinite canvas where you own the
 - Resizable and collapsible sidebar, editor toolbar is the top bar so the canvas fills the screen
 - Opening a notebook lands on its first page
 - TipTap rich text blocks
+- Drop, paste, or import images as floating canvas boxes with select, 8 way resize (corners scale, edges stretch), corner rounding, aspect presets, and crop
+- Import any file as an attachment pill (double click to open) or, for PDFs, as a printout that lays every page out as images (with the original file dropped as an attachment centered above the first page) or as a PDF window you scroll and resize freely, with a right click toggle to switch it into a slideshow (arrows or ← → keys step through pages, type a page number to jump, ⌘/Ctrl+scroll to zoom, and a collapsible thumbnail sidebar)
+- Right click any text box, image, or PDF window to justify it left (canvas edge) or right (the doc width marker, which it then tracks as you slide the margin), or unjustify
+- All imported media is copied into the page's `attachments/` folder so a notebook stays self contained and portable
+- Undo/redo for box deletions, files are only erased from disk once a delete can no longer be undone
 - Freehand ink drawing (perfect-freehand) via the Pointer Events API
 - Open `.nbook` files (a zip bundle) straight from your own folder
 - Installable PWA that works fully offline

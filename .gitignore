@@ -6,3 +6,4 @@ dist-ssr
 dev-dist
 *.tsbuildinfo
 .claude/settings.local.json
+changes.txt

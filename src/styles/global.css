@@ -322,7 +322,9 @@
   width: 100%;
   padding: 8px 10px;
   border-radius: 4px;
-  background: #fff;
+  /*transparent at rest so a box laid over an image shows the image, not a white
+    square. a white backing comes back on hover/focus for comfortable editing*/
+  background: transparent;
   cursor: move;
   transition: box-shadow 0.12s ease;
 }
@@ -353,5 +355,609 @@
 .canvas-box:has(.canvas-box-text:not(:empty)):hover .canvas-box-frame,
 .canvas-box:has(.canvas-box-text:not(:empty)):focus-within .canvas-box-frame {
   box-shadow: 0 0 0 2px #9ca3af;
+}
+
+/*white backing while hovering or editing so text stays readable over an image,
+  matched to the ring above. at rest the frame is transparent (see above)*/
+.canvas-box:hover .canvas-box-frame,
+.canvas-box:focus-within .canvas-box-frame {
+  background: #fff;
+}
+
+/*image boxes: the whole frame is the drag handle, the image fills the box so
+  edges stretch and corners scale. grey ring on hover, blue when selected*/
+.canvas-image {
+  outline: none;
+}
+
+.canvas-image-frame {
+  cursor: move;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px transparent;
+  transition: box-shadow 0.12s ease;
+}
+
+.canvas-image:hover .canvas-image-frame {
+  box-shadow: 0 0 0 2px #9ca3af;
+}
+
+.canvas-image.is-selected .canvas-image-frame {
+  box-shadow: 0 0 0 2px #3b82f6;
+}
+
+.canvas-image-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: fill;
+  user-select: none;
+}
+
+/*neutral placeholder shown while the object url resolves*/
+.canvas-image-loading {
+  width: 100%;
+  height: 100%;
+  background: #f3f4f6;
+}
+
+/*small square grips shown around a selected image*/
+.canvas-image-handle {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 0 0 1.5px #3b82f6;
+}
+
+/*attachment widget: a draggable pill showing the file icon and name*/
+.canvas-attachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px #e5e7eb;
+  transition: box-shadow 0.12s ease;
+  outline: none;
+}
+
+.canvas-attachment:hover {
+  box-shadow: 0 0 0 2px #9ca3af;
+}
+
+.canvas-attachment:focus {
+  box-shadow: 0 0 0 2px #3b82f6;
+}
+
+.canvas-attachment-name {
+  overflow: hidden;
+  font-size: 0.875rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/*pdf window: a resizable viewport scrolling the pdf inline. the bar is the drag
+  handle, the iframe fills the rest, a corner grip resizes freely*/
+/*outer box stays unclipped so the resize handles can sit outside its edges*/
+.canvas-pdf {
+  outline: none;
+}
+
+/*the body carries the rounded frame and clips the bar/iframe to it. contain +
+  content-visibility isolate the heavy pdf viewer's layout/paint and let the
+  browser skip rendering it entirely while it's scrolled off-screen*/
+.canvas-pdf-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px #e5e7eb;
+  transition: box-shadow 0.12s ease;
+  contain: layout paint style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 300px;
+}
+
+/*slideshow stage: optional thumbnail rail beside the page area*/
+.canvas-pdf-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/*clip that animates its width on toggle; the rail inside keeps its full width so
+  the previews slide in/out instead of squishing (mirrors the page sidebar)*/
+.canvas-pdf-thumbs-wrap {
+  flex: 0 0 auto;
+  width: 0;
+  overflow: hidden;
+  transition: width 200ms ease-out;
+}
+
+.canvas-pdf-thumbs-wrap.is-open {
+  width: 124px;
+}
+
+/*thumbnail rail: scrollable column of page previews*/
+.canvas-pdf-thumbs {
+  width: 124px;
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  background: #f9fafb;
+  box-shadow: inset 1px 0 0 #e5e7eb;
+}
+
+.canvas-pdf-thumb {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  outline: none;
+}
+
+.canvas-pdf-thumb:hover {
+  background: #f1f5f9;
+}
+
+.canvas-pdf-thumb.is-active {
+  background: #e0edff;
+  box-shadow: inset 0 0 0 1.5px #3b82f6;
+}
+
+/*canvas size comes from inline styles set during render; the placeholder just
+  mirrors the thumbnail width until the page paints*/
+.canvas-pdf-thumb-canvas {
+  display: block;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
+}
+
+.canvas-pdf-thumb-ph {
+  width: 92px;
+  aspect-ratio: 1 / 1.3;
+  background: #e5e7eb;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
+}
+
+.canvas-pdf-thumb-num {
+  font-size: 0.7rem;
+  color: #6b7280;
+}
+
+/*slideshow page area: centers the single rendered page, and pans (scrolls) when
+  the page is zoomed larger than the window. margin:auto on the canvas centers it
+  while still allowing scroll to every edge (flex centering would clip overflow)*/
+.canvas-pdf-slide {
+  flex: 1;
+  min-height: 0;
+  /*let the viewer shrink below the page's width so it makes room for the rail
+    (the pages then reflow narrower) instead of overflowing*/
+  min-width: 0;
+  display: flex;
+  overflow: auto;
+  background: #f3f4f6;
+}
+
+.canvas-pdf-canvas {
+  display: block;
+  margin: auto;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.15);
+}
+
+/*continuous scroll viewer: pages stacked top to bottom, centered, scrollable.
+  pans horizontally too once a page is zoomed wider than the window*/
+.canvas-pdf-scroll {
+  flex: 1;
+  min-height: 0;
+  /*let the viewer shrink below the pages' width so it makes room for the rail
+    (the pages then reflow narrower) instead of overflowing*/
+  min-width: 0;
+  overflow: auto;
+  /*always reserve the scrollbar gutter so the content width (and therefore each
+    page's height) doesn't change when the bar shows/hides. without this, fitting
+    the window to the content height oscillates: hiding the bar widens the pages,
+    which re-overflows and brings the bar back, and so on*/
+  scrollbar-gutter: stable;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  /*extra left room so each page's number sits in the margin to its left*/
+  padding: 10px 10px 10px 44px;
+  background: #f3f4f6;
+}
+
+/*page number in the scroll viewer's left margin, centred on its page*/
+.canvas-pdf-page-tag {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-right: 10px;
+  padding: 1px 4px;
+  border-radius: 5px;
+  font-size: 0.8rem;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  pointer-events: none;
+}
+
+/*briefly highlight the number after jumping to its page from the sidebar*/
+.canvas-pdf-page-tag.is-flash {
+  animation: pdf-tag-flash 1.3s ease-out both;
+}
+
+@keyframes pdf-tag-flash {
+  0% {
+    color: #6b7280;
+    background: transparent;
+    transform: translateY(-50%) scale(1);
+  }
+  18% {
+    color: #1d4ed8;
+    background: rgba(37, 99, 235, 0.16);
+    transform: translateY(-50%) scale(1.35);
+  }
+  100% {
+    color: #6b7280;
+    background: transparent;
+    transform: translateY(-50%) scale(1);
+  }
+}
+
+/*each page slot reserves its height (set inline from the aspect ratio) so the
+  scrollbar is stable before the canvas paints. relative so the text layer can
+  overlay the canvas*/
+.canvas-pdf-page {
+  position: relative;
+  flex: 0 0 auto;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.15);
+}
+
+.canvas-pdf-page-canvas {
+  display: block;
+}
+
+/*pdf.js text layer: transparent, absolutely-positioned spans matching the glyph
+  layout so the rendered page is selectable. spans get their own inline left/top/
+  font-size/transform from pdf.js; --scale-factor is set via setLayerDimensions*/
+.textLayer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 1;
+  caret-color: CanvasText;
+}
+
+.textLayer span,
+.textLayer br {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+
+.textLayer span.markedContent {
+  top: 0;
+  height: 0;
+}
+
+.textLayer ::selection {
+  background: rgb(0 100 255 / 0.28);
+}
+
+/*bottom-center control pill: prev arrow, page field, total, next arrow*/
+.canvas-pdf-controls {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  border-radius: 9999px;
+  background: rgb(17 24 39 / 0.78);
+  color: #fff;
+  font-size: 0.75rem;
+}
+
+.canvas-pdf-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 9999px;
+  color: #fff;
+  cursor: pointer;
+}
+
+.canvas-pdf-nav:hover {
+  background: rgb(255 255 255 / 0.18);
+}
+
+.canvas-pdf-nav:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.canvas-pdf-count {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  cursor: text;
+}
+
+/*no box around the number: blends into the pill, just the white digits. strip
+  the user-agent border/appearance/shadow too*/
+/*two classes so it outranks any same-specificity rule; the native text-field
+  bezel only shows at rest, so kill appearance + border outright*/
+.canvas-pdf-controls .canvas-pdf-page-input,
+.canvas-pdf-controls .canvas-pdf-page-input:focus,
+.canvas-pdf-controls .canvas-pdf-page-input:focus-visible {
+  background: transparent;
+  color: #fff;
+  text-align: center;
+  font-size: 0.75rem;
+  border: none;
+  outline: none;
+  box-shadow: none;
+  appearance: none;
+  -webkit-appearance: none;
+  color-scheme: light;
+}
+
+/*when focused, light up just the editable number so it reads as an active edit
+  field: a boxed highlight + visible caret tell the user typing now changes the
+  page (the / N total stays plain so it's clear which part you're editing)*/
+.canvas-pdf-controls .canvas-pdf-page-input:focus {
+  background: rgb(255 255 255 / 0.22);
+  border-radius: 5px;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.55);
+  caret-color: #fff;
+}
+
+/*show the auto-select highlight so the editable digits look selected/replaceable*/
+.canvas-pdf-page-input::selection {
+  background: rgb(255 255 255 / 0.35);
+}
+
+.canvas-pdf-count-total {
+  opacity: 0.85;
+}
+
+.canvas-pdf:hover .canvas-pdf-body {
+  box-shadow: 0 0 0 2px #9ca3af;
+}
+
+.canvas-pdf:focus .canvas-pdf-body,
+.canvas-pdf:focus-within .canvas-pdf-body,
+.canvas-pdf.is-selected .canvas-pdf-body {
+  box-shadow: 0 0 0 2px #3b82f6;
+}
+
+.canvas-pdf-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #f9fafb;
+  box-shadow: inset 0 -1px 0 #e5e7eb;
+  cursor: move;
+  user-select: none;
+}
+
+/*title: clickable, only as wide as its text (capped so long names ellipsis),
+  highlights on hover. single click opens the pdf in a new tab*/
+.canvas-pdf-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 70%;
+  padding: 2px 6px;
+  margin: -2px 0 -2px -4px;
+  border-radius: 4px;
+  cursor: pointer;
+  outline: none;
+  transition: background 0.12s ease;
+}
+
+.canvas-pdf-title:hover {
+  background: #eceef1;
+}
+
+.canvas-pdf-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  /*own compositor layer so its internal scrolling repaints on its own surface
+    instead of the large shared canvas overlay*/
+  transform: translateZ(0);
+}
+
+/*info affordance pinned to the right of the title bar*/
+.canvas-pdf-info {
+  position: relative;
+}
+
+.canvas-pdf-info-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border-radius: 4px;
+  color: #6b7280;
+  cursor: pointer;
+  outline: none;
+}
+
+.canvas-pdf-info-btn:hover {
+  color: #111827;
+  background: #e5e7eb;
+}
+
+/*shortcut popover, hangs below the info icon. anchored to the left now the info
+  button sits at the bar's left edge, so it opens rightward and isn't clipped.
+  light to match the rest of the page chrome*/
+.canvas-pdf-hint {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 10;
+  width: max-content;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fff;
+  color: #374151;
+  font-size: 0.75rem;
+  box-shadow: 0 0 0 1px #e5e7eb, 0 4px 12px rgb(0 0 0 / 0.08);
+}
+
+.canvas-pdf-hint-title {
+  margin-bottom: 4px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.canvas-pdf-hint-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.7;
+}
+
+.canvas-pdf-hint kbd {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  box-shadow: inset 0 0 0 1px #e5e7eb;
+  font-family: inherit;
+  font-size: 0.7rem;
+  color: #374151;
+}
+
+/*crop tool layered over the full image while cropping*/
+.canvas-crop {
+  position: absolute;
+  inset: 0;
+}
+
+/*dims the area outside the selection, clipped to the image bounds*/
+.canvas-crop-mask {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.canvas-crop-shade {
+  position: absolute;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+}
+
+/*the selection rectangle, drag interior to move*/
+.canvas-crop-rect {
+  position: absolute;
+  cursor: move;
+  outline: 1px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.canvas-crop-actions {
+  position: absolute;
+  display: flex;
+  gap: 4px;
+}
+
+.canvas-crop-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: #fff;
+  color: #111;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  outline: none;
+}
+
+.canvas-crop-actions button:hover {
+  background: #f3f4f6;
+}
+
+/*confirm stands out: larger, blue, white check*/
+.canvas-crop-actions button.is-confirm {
+  width: 34px;
+  height: 34px;
+  background: #2563eb;
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.5);
+}
+
+.canvas-crop-actions button.is-confirm:hover {
+  background: #1d4ed8;
+}
+
+/*save indicator: ring pops in then the check strokes itself on*/
+@keyframes save-check-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes save-check-draw {
+  from {
+    stroke-dashoffset: 22;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.save-check-pop {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: save-check-pop 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.save-check-draw {
+  stroke-dasharray: 22;
+  animation: save-check-draw 0.32s ease-out 0.06s both;
 }
 

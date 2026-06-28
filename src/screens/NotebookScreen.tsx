@@ -56,6 +56,74 @@ interface TreeContext {
 
 const TreeCtx = createContext<TreeContext | null>(null)
 
+//save status badge next to the notebook name: a spinning ring while saving that
+//morphs into a check on success, then fades out a couple seconds after it settles
+function SaveIndicator({ state }: { state: 'idle' | 'saving' | 'saved' }) {
+  //hidden -> shown (held) -> leaving (fades out) -> hidden
+  const [check, setCheck] = useState<'hidden' | 'shown' | 'leaving'>('hidden')
+  useEffect(() => {
+    if (state === 'saved') {
+      setCheck('shown')
+      const t = setTimeout(() => setCheck('leaving'), 2000)
+      return () => clearTimeout(t)
+    }
+    //a new save in flight clears any lingering tick immediately
+    if (state === 'saving') setCheck('hidden')
+  }, [state])
+
+  //unmount once the fade-out has played
+  useEffect(() => {
+    if (check !== 'leaving') return
+    const t = setTimeout(() => setCheck('hidden'), 350)
+    return () => clearTimeout(t)
+  }, [check])
+
+  const saving = state === 'saving'
+  if (!saving && check === 'hidden') return null
+
+  return (
+    <span
+      className={cn(
+        'inline-flex size-3.5 shrink-0 transition-opacity duration-300',
+        saving ? 'text-muted-foreground' : 'text-emerald-500',
+        check === 'leaving' ? 'opacity-0' : 'opacity-100',
+      )}
+      aria-label={saving ? 'saving' : 'saved'}
+      title={saving ? 'saving…' : 'saved'}
+    >
+      <svg viewBox="0 0 24 24" fill="none" className="size-full">
+        {saving ? (
+          //three-quarter arc spun about its centre reads as a loader
+          <circle
+            cx="12"
+            cy="12"
+            r="9"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeDasharray="42"
+            strokeDashoffset="14"
+            className="animate-spin"
+            style={{ transformBox: 'fill-box', transformOrigin: 'center' }}
+          />
+        ) : (
+          <g className="save-check-pop">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" />
+            <path
+              d="M7.5 12.5l3 3 6-6.5"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="save-check-draw"
+            />
+          </g>
+        )}
+      </svg>
+    </span>
+  )
+}
+
 //notebook workspace, pages sidebar tree plus the word style page editor
 export function NotebookScreen() {
   const navigate = useNavigate()
@@ -76,6 +144,7 @@ export function NotebookScreen() {
   const [confirm, setConfirm] = useState<PageNode | null>(null)
   const [rename, setRename] = useState<PageNode | null>(null)
   const renameNode = useAppStore((s) => s.renameNode)
+  const promoteActivePageToFolder = useAppStore((s) => s.promoteActivePageToFolder)
   const [draggingPath, setDraggingPath] = useState<string | null>(null)
   //bumped to ask the active page's canvas to flip the title shown/hidden, plus
   //the title's current visibility so the menu can label show vs hide
@@ -90,6 +159,9 @@ export function NotebookScreen() {
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem(COLLAPSED_KEY) === '1',
   )
+  //true only while the divider is being dragged so the width transition (used for
+  //the collapse toggle) doesn't make the edge lag behind the pointer
+  const [resizing, setResizing] = useState(false)
 
   useEffect(() => {
     localStorage.setItem(WIDTH_KEY, String(width))
@@ -114,6 +186,7 @@ export function NotebookScreen() {
     e.preventDefault()
     const startX = e.clientX
     const startW = width
+    setResizing(true)
     function onMove(ev: PointerEvent) {
       const next = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW + ev.clientX - startX))
       setWidth(next)
@@ -123,6 +196,7 @@ export function NotebookScreen() {
       window.removeEventListener('pointerup', onUp)
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
+      setResizing(false)
     }
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
@@ -142,7 +216,9 @@ export function NotebookScreen() {
       {/*sidebar, width animates between 0 and its set size when toggled*/}
       <aside
         className={cn(
-          'relative shrink-0 overflow-hidden transition-[width] duration-200 ease-out',
+          'relative shrink-0 overflow-hidden',
+          //animate width on collapse toggle, but not while actively dragging
+          !resizing && 'transition-[width] duration-200 ease-out',
           !collapsed && 'border-r border-border',
         )}
         style={{ width: collapsed ? 0 : width }}
@@ -160,17 +236,11 @@ export function NotebookScreen() {
             >
               <ChevronLeft />
             </Button>
-            <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-1 items-center gap-1.5">
               <h1 className="truncate text-sm font-semibold tracking-tight">
                 {activeNotebook?.name}
               </h1>
-              <p className="truncate text-xs text-muted-foreground">
-                {saveState === 'saving'
-                  ? 'saving…'
-                  : saveState === 'saved'
-                    ? 'saved'
-                    : library?.name}
-              </p>
+              <SaveIndicator state={saveState} />
             </div>
             <Button
               variant="ghost"
@@ -269,7 +339,11 @@ export function NotebookScreen() {
             pageKey={activePage.path}
             pageName={activePage.name}
             content={pageContent}
-            onSave={savePage}
+            pageDir={activePage.dirHandle}
+            ensurePageDir={promoteActivePageToFolder}
+            //bind the save to this page so a debounced flush that lands after a
+            //switch writes this file, not whatever page became active meanwhile
+            onSave={(html) => savePage(html, activePage)}
             onRenamePage={(name) => renameNode(activePage.path, name)}
             toggleTitleNonce={toggleTitleNonce}
             onTitleHiddenChange={setActiveTitleHidden}
