@@ -8,7 +8,7 @@ An offline first PWA notebook. A OneNote style infinite canvas where you own the
 - vite-plugin-pwa (manifest and Workbox service worker)
 - Zustand for state, idb-keyval for persisting folder handles
 - Tailwind CSS v4 with shadcn style components (cva and tailwind-merge), lucide-react icons
-- TipTap rich text editing via reactjs-tiptap-editor for the page toolbar
+- Quill rich text editing for the page toolbar
 
 ## Features
 
@@ -18,7 +18,7 @@ An offline first PWA notebook. A OneNote style infinite canvas where you own the
 - Custom page order persisted per folder, not just alphabetical
 - Resizable and collapsible sidebar, editor toolbar is the top bar so the canvas fills the screen
 - Opening a notebook lands on its first page
-- TipTap rich text blocks
+- Quill rich text blocks
 - Drop, paste, or import images as floating canvas boxes with select, 8 way resize (corners scale, edges stretch), corner rounding, aspect presets, and crop
 - Import any file as an attachment pill (double click to open) or, for PDFs, as a printout that lays every page out as images (with the original file dropped as an attachment centered above the first page) or as a PDF window you scroll and resize freely, with a right click toggle to switch it into a slideshow (arrows or ← → keys step through pages, type a page number to jump, ⌘/Ctrl+scroll to zoom, and a collapsible thumbnail sidebar)
 - Right click any text box, image, or PDF window to justify it left (canvas edge) or right (the doc width marker, which it then tracks as you slide the margin), or unjustify

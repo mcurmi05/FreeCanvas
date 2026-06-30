@@ -136,11 +136,11 @@ export function PageCanvas({
   onTitleHiddenChange,
 }: Props) {
   const wrapper = useRef<HTMLDivElement>(null)
-  //the library's scrolling content node, where we portal the title and boxes
+  //the editor's scrolling content node, where we portal the title and boxes
   const [contentEl, setContentEl] = useState<HTMLElement | null>(null)
   const initial = useRef(parsePage(content))
   //width of the document text column, dragged via the marker at the top of the
-  //canvas and fed to the prosemirror max-width via the --doc-w css variable
+  //canvas and fed to the document max-width via the --doc-w css variable
   const [docW, setDocW] = useState(initial.current.docWidth)
   const docWRef = useRef(docW)
   const docHtml = useRef(initial.current.docHtml)
@@ -317,7 +317,7 @@ function pushUndo(action: UndoAction) {
     pushUndo({ type: 'geom', id, before: pending.before, after })
   }
 
-  //tiptap only toggles its toolbar undo/redo from the document's own history, so
+  //the editor only toggles its toolbar undo/redo from document history, so
   //it can't see canvas edits (resize, delete). drive each button from the true
   //combined state: enabled when either our stack or the document has something
   //to roll, disabled (and greyed) otherwise. computed from ground truth so a
@@ -414,7 +414,7 @@ function pushUndo(action: UndoAction) {
   >(() => {})
 
   //intercept pasted images anywhere on the page (document, a box, or the bare
-  //canvas) in capture phase, before prosemirror or a contentEditable can embed
+  //canvas) in capture phase, before the editor or a contentEditable can embed
   //them. route them through the same import path as drop so behaviour matches
   useEffect(() => {
     const el = wrapper.current
@@ -479,9 +479,9 @@ function pushUndo(action: UndoAction) {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  //route the tiptap toolbar's undo/redo arrow buttons through the canvas stack.
+  //route the editor toolbar's undo/redo arrow buttons through the canvas stack.
   //caught in capture so a pending canvas action runs and the editor's own undo
-  //is suppressed (stopPropagation keeps the click from reaching tiptap's
+  //is suppressed (stopPropagation keeps the click from reaching editor's
   //handler); once our stack drains the click falls through to the editor as
   //normal. the buttons are matched by their lucide undo/redo icon
   useEffect(() => {
@@ -501,8 +501,8 @@ function pushUndo(action: UndoAction) {
       ;(isRedo ? redoRef : undoRef).current()
     }
     el.addEventListener('click', onClick, true)
-    //tiptap disables the buttons when the document has no history, and may
-    //re-disable them on its own re-renders. re-enable them whenever the canvas
+    //the editor disables buttons when document has no history, and may
+    //re-disable them on its own re-renders. re-enable them whenever canvas
     //stack still has something to roll
     const obs = new MutationObserver(() => syncUndoButtons())
     obs.observe(el, { childList: true, subtree: true, attributeFilter: ['disabled'] })
@@ -521,7 +521,7 @@ function pushUndo(action: UndoAction) {
       if (e.button !== 0) return
       const t = e.target as HTMLElement
       if (
-        t.closest('.ProseMirror') ||
+        t.closest('.ql-editor') ||
         t.closest('.canvas-box') ||
         t.closest('.page-title') ||
         t.closest('.doc-width-bar')
@@ -1307,7 +1307,7 @@ function copySelection() {
             )}
 
             <div
-              //tiptap pins the prosemirror layer at z-index:0, lift the box
+              //the document editor layer sits below the freeform box overlay
               //overlay above it or the editor paints over boxes and eats hits
               className="pointer-events-none absolute left-0 top-0 z-10"
               style={{ width: extent.w || undefined, height: extent.h || undefined }}

@@ -97,41 +97,28 @@
   }
 }
 
-/*fill the pane reliably. the library nests the editor in several wrapper divs
-/*of unknown depth, so rather than flex each level, anchor the root and pin the
-/*flex column to fill it directly, then let the wrappers stop clipping*/
-.editor-fill .reactjs-tiptap-editor {
-  position: absolute;
-  inset: 0;
-}
-
-.editor-fill .richtext-max-h-full {
+/*fill the pane reliably. quill owns the document editor, while this shell
+  keeps the toolbar fixed and the editable canvas scrollable*/
+.editor-fill .quill-editor-shell {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
-  max-height: none !important;
-}
-
-/*neutralise the wrapper boxes between the root and the flex column*/
-.editor-fill .reactjs-tiptap-editor > div,
-.editor-fill .richtext-overflow-hidden {
-  overflow: visible;
-  border-radius: 0;
-  box-shadow: none;
-  outline: none;
+  background: #fff;
 }
 
 /*the editor content area is the canvas, blank white, scrolls, fills height*/
 /*the document sits at the top, the rest is raw canvas for text boxes*/
 /*flex column so the title header can sit above the document via order*/
-.editor-fill .rte-content {
+.editor-fill .rte-content.ql-container {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   background: #fff;
+  border: 0;
+  font-family: Arial, sans-serif;
   /*the blank canvas is free-text space, show the text caret like a doc. boxes
     and the title override with their own move/text cursors*/
   cursor: text;
@@ -240,13 +227,8 @@
   margin-left: 1rem;
 }
 
-/*no block drag handle or insert (+) button, the document types like word*/
-.editor-fill .drag-handle {
-  display: none !important;
-}
-
 /*the main document, left aligned column sized to its content, no card*/
-.editor-fill .ProseMirror {
+.editor-fill .ql-editor.rte-document {
   width: 100%;
   /*text column is --doc-w (set by the width slider) plus the 40px left and
     right padding*/
@@ -262,97 +244,333 @@
   border: none;
   box-shadow: none;
   cursor: text;
-}
-
-/*hide ProseMirror's native drop cursor; canvas file drops use our importer*/
-.editor-fill .ProseMirror-dropcursor {
-  display: none !important;
+  overflow: visible;
 }
 
 /*horizontal dividers should sit close to following text like a page rule*/
-.editor-fill .ProseMirror hr {
- margin: 6px 0 !important;
+.editor-fill .ql-editor hr {
+  margin: 6px 0 !important;
 }
 
 /*avoid inflated paragraph margins around inserted dividers*/
-.editor-fill .ProseMirror p:has(+ hr),
-.editor-fill .ProseMirror hr + p {
- margin-bottom: 0 !important;
- margin-top: 0 !important;
-}
-
-.rte-toolbar-select {
- height: 32px;
- border: 1px solid var(--border);
- border-radius: 6px;
- background: #fff;
- color: var(--foreground);
- font-size: 0.8125rem;
- line-height: 1;
- outline: none;
- padding: 0 24px 0 8px;
-}
-
-.rte-toolbar-select:focus-visible {
- box-shadow: 0 0 0 2px var(--ring);
-}
-
-.rte-toolbar-select-family {
- width: 118px;
-}
-
-.rte-toolbar-select-size,
-.rte-toolbar-select-line {
- width: 74px;
-}
-
-/*the library pins padding with a tripled-class rule scoped under its own
-  doubled wrapper class, plus a min-width:1024px override, both specificity 5.
-  match that wrapper and add .editor-fill to clear it so the left pad always
-  wins and the document lines up with the title*/
-.editor-fill .reactjs-tiptap-editor.reactjs-tiptap-editor .ProseMirror.ProseMirror.ProseMirror {
-  padding: 11px 40px 80px 40px;
-}
-
-/*the library renders indent as text-indent, which only shifts the first line*/
-/*and leaves wrapped lines flush. shift the whole block instead so lines align*/
-.editor-fill .ProseMirror *[data-indent] {
-  text-indent: 0 !important;
-}
-.editor-fill .ProseMirror *[data-indent='1'] {
-  margin-left: 2em;
-}
-.editor-fill .ProseMirror *[data-indent='2'] {
-  margin-left: 4em;
-}
-.editor-fill .ProseMirror *[data-indent='3'] {
-  margin-left: 6em;
-}
-.editor-fill .ProseMirror *[data-indent='4'] {
-  margin-left: 8em;
-}
-.editor-fill .ProseMirror *[data-indent='5'] {
-  margin-left: 10em;
-}
-.editor-fill .ProseMirror *[data-indent='6'] {
-  margin-left: 12em;
-}
-.editor-fill .ProseMirror *[data-indent='7'] {
-  margin-left: 14em;
+.editor-fill .ql-editor p:has(+ hr),
+.editor-fill .ql-editor hr + p {
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
 }
 
 /*match the editor toolbar height to the sidebar header so the bars line up*/
-.editor-fill .richtext-max-h-full > :first-child {
+.editor-fill .rte-toolbar {
+  position: relative;
+  z-index: 50;
   height: 48px;
   min-height: 48px;
   display: flex;
   align-items: center;
-  overflow-x: auto;
-  overflow-y: hidden;
+  gap: 4px;
+  overflow: visible;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 10px;
+  white-space: nowrap;
 }
 
-.editor-fill .richtext-max-h-full > :first-child > * {
+.editor-fill .rte-toolbar.ql-snow {
+  box-sizing: border-box;
+}
+
+.editor-fill .rte-toolbar .ql-formats {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   flex-wrap: nowrap;
+  margin-right: 8px;
+}
+
+.editor-fill .rte-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+}
+
+.editor-fill .rte-toolbar .ql-picker-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  height: 30px;
+  border-radius: 6px;
+  padding-left: 8px;
+  padding-right: 22px;
+}
+
+.editor-fill .rte-toolbar button:hover,
+.editor-fill .rte-toolbar .ql-picker-label:hover,
+.editor-fill .rte-native-select:hover,
+.editor-fill .rte-size-input:hover,
+.editor-fill .rte-color-button:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.editor-fill .rte-toolbar button.is-active,
+.editor-fill .rte-toolbar button.ql-active {
+  color: #fff;
+  background: #2563eb;
+}
+
+.editor-fill .rte-toolbar button:disabled {
+  color: var(--muted-foreground);
+  background: transparent;
+  opacity: 0.45;
+}
+
+.editor-fill .rte-native-select,
+.editor-fill .rte-size-input {
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  line-height: 1;
+  outline: none;
+}
+
+.editor-fill .rte-native-select {
+  padding: 0 24px 0 8px;
+}
+
+.editor-fill .rte-font-select {
+  width: 178px;
+}
+
+.editor-fill .rte-font-menu {
+  position: relative;
+  width: 190px;
+}
+
+.editor-fill .rte-font-trigger {
+  display: flex !important;
+  width: 190px !important;
+  justify-content: flex-start !important;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--foreground);
+  padding: 0 26px 0 8px;
+  font-size: 0.8125rem;
+  line-height: 1;
+}
+
+.editor-fill .rte-font-trigger::after {
+  content: '';
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  transform: translateY(-35%);
+}
+
+.editor-fill .rte-font-popover {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 140;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 230px;
+  max-height: min(420px, calc(100vh - 72px));
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.16);
+  padding: 4px;
+}
+
+.editor-fill .rte-font-popover button {
+  display: flex !important;
+  flex: 0 0 auto;
+  width: 100% !important;
+  height: 30px !important;
+  justify-content: flex-start !important;
+  border-radius: 6px;
+  padding: 0 8px;
+  color: var(--foreground);
+  font-size: 0.875rem;
+}
+
+.editor-fill .rte-font-popover button:hover,
+.editor-fill .rte-font-popover button.is-selected {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.editor-fill .rte-size-input {
+  width: 72px;
+  padding: 0 7px;
+}
+
+.editor-fill .rte-native-select:focus-visible,
+.editor-fill .rte-size-input:focus-visible,
+.editor-fill .rte-toolbar button:focus-visible,
+.editor-fill .rte-color-button:focus-within {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.editor-fill .rte-color-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  color: var(--foreground);
+}
+
+.editor-fill .rte-color-button input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.editor-fill .rte-font-color-icon {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 18px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.editor-fill .rte-font-color-icon::after {
+  content: '';
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 1px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--rte-color);
+}
+
+.editor-fill .rte-tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.editor-fill .rte-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 8px);
+  z-index: 120;
+  max-width: 240px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.14);
+  font-size: 0.75rem;
+  line-height: 1.2;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -2px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  white-space: nowrap;
+}
+
+.editor-fill .rte-tip:hover::after,
+.editor-fill .rte-tip:focus-within::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.editor-fill .rte-toolbar .ql-picker {
+  position: relative;
+  height: 30px;
+  color: var(--foreground);
+}
+
+.editor-fill .rte-toolbar .ql-picker.ql-expanded {
+  z-index: 100;
+}
+
+.editor-fill .rte-toolbar .ql-color,
+.editor-fill .rte-toolbar .ql-background,
+.editor-fill .rte-toolbar .ql-align {
+  width: 34px;
+}
+
+.editor-fill .rte-toolbar .ql-picker-options {
+  z-index: 100;
+}
+
+.editor-fill .ql-tooltip {
+  z-index: 90;
+}
+
+.editor-fill .rte-toolbar .rte-static-icon {
+  display: none;
+}
+
+.editor-fill .ql-editor pre,
+.editor-fill .ql-editor .ql-code-block-container {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #111827;
+  color: #f9fafb;
+  font-family: 'Courier New', monospace;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.editor-fill .code-light .ql-editor pre,
+.editor-fill .code-light .ql-editor .ql-code-block-container {
+  border: 1px solid #d1d5db;
+  background: #f8fafc;
+  color: #111827;
+}
+
+.editor-fill .ql-editor .ql-indent-1 {
+  padding-left: 2em;
+}
+.editor-fill .ql-editor .ql-indent-2 {
+  padding-left: 4em;
+}
+.editor-fill .ql-editor .ql-indent-3 {
+  padding-left: 6em;
+}
+.editor-fill .ql-editor .ql-indent-4 {
+  padding-left: 8em;
+}
+.editor-fill .ql-editor .ql-indent-5 {
+  padding-left: 10em;
+}
+.editor-fill .ql-editor .ql-indent-6 {
+  padding-left: 12em;
+}
+.editor-fill .ql-editor .ql-indent-7 {
+  padding-left: 14em;
 }
 
 /*floating note containers, invisible until hovered or focused, auto height*/
