@@ -17,17 +17,21 @@ import {
   AlignRight,
   ArrowUp,
   ArrowUpToLine,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Crop,
-  EyeOff,
-  ImagePlus,
-  PanelRightClose,
+ Check,
+ ChevronLeft,
+ ChevronRight,
+ ClipboardPaste,
+ Copy,
+ Crop,
+ EyeOff,
+ ImagePlus,
+ Link as LinkIcon,
+ PanelRightClose,
   PanelRightOpen,
   Presentation,
-  RectangleHorizontal,
-  ScrollText,
+ RectangleHorizontal,
+ Scissors,
+ ScrollText,
   StretchVertical,
   Trash2,
 } from 'lucide-react'
@@ -35,6 +39,15 @@ import { PageEditor, type EditorCan } from '@/components/PageEditor'
 import { attachmentUrl, deleteAttachment, readAttachment, writeAttachment } from '@/lib/attachments'
 import { importAttachment, importImage, isImage, isPdf } from '@/lib/importFiles'
 import { ImportChoiceDialog, type ImportChoice } from '@/components/ImportChoiceDialog'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { File as FileIcon, FileText, Info } from 'lucide-react'
 import { validateName } from '@/lib/fs'
 import { DEFAULT_DOC_WIDTH, parsePage, rid, serializePage, type BoxMeta } from '@/lib/pageDoc'
@@ -54,6 +67,7 @@ interface Props {
   onSave: (html: string) => void | Promise<void>
   //rename the page when the title is edited, returns false on failure
   onRenamePage: (name: string) => Promise<boolean>
+  onTitleDraft?: (name: string) => void
   //bumped from the sidebar menu to toggle the title shown/hidden
   toggleTitleNonce?: number
   //report the current title visibility so the sidebar can label its menu item
@@ -117,6 +131,7 @@ export function PageCanvas({
   ensurePageDir,
   onSave,
   onRenamePage,
+  onTitleDraft,
   toggleTitleNonce,
   onTitleHiddenChange,
 }: Props) {
@@ -224,9 +239,11 @@ export function PageCanvas({
   //before and after a move/resize/crop so it can be rolled either way. a media
   //file is only erased from disk once its deletion drops off the undo history,
   //so undo can always bring the box (and its image) back
-  type UndoAction =
-    | { type: 'delete'; box: BoxMeta; html?: string }
-    | { type: 'geom'; id: string; before: Partial<BoxMeta>; after: Partial<BoxMeta> }
+type UndoAction =
+  | { type: 'delete'; box: BoxMeta; html?: string }
+  | { type: 'deleteMany'; boxes: BoxMeta[]; html?: Record<string, string> }
+  | { type: 'add'; boxes: BoxMeta[]; html?: Record<string, string> }
+  | { type: 'geom'; id: string; before: Partial<BoxMeta>; after: Partial<BoxMeta> }
     //a stacking change: the box moved from one index in the paint order to another
     | { type: 'order'; id: string; from: number; to: number }
   const undoStack = useRef<UndoAction[]>([])
@@ -243,11 +260,17 @@ export function PageCanvas({
   //a deletion is now permanent: drop the box's text and, if no remaining box
   //still uses its file, revoke the url and erase the file from attachments. only
   //delete entries touch disk, geom entries leave nothing to clean up
-  function finalizeDelete(action: UndoAction) {
-    if (action.type !== 'delete') return
-    delete boxHtml.current[action.box.id]
-    const file = action.box.file
-    if (!file || boxesRef.current.some((b) => b.file === file)) return
+function finalizeDelete(action: UndoAction) {
+  const removed =
+    action.type === 'delete'
+      ? [action.box]
+      : action.type === 'deleteMany' || action.type === 'add'
+        ? action.boxes
+        : []
+  for (const box of removed) {
+    delete boxHtml.current[box.id]
+    const file = box.file
+    if (!file || boxesRef.current.some((b) => b.file === file)) continue
     const url = mediaUrls.current.get(file)
     if (url) {
       URL.revokeObjectURL(url)
@@ -255,11 +278,13 @@ export function PageCanvas({
     }
     if (pageDirRef.current) void deleteAttachment(pageDirRef.current, file)
   }
+}
 
   //push an action and clear redo, evicting (and finalizing) the oldest past the cap
-  function pushUndo(action: UndoAction) {
-    undoStack.current.push(action)
-    redoStack.current = []
+function pushUndo(action: UndoAction) {
+  undoStack.current.push(action)
+  redoStack.current.forEach(finalizeDelete)
+  redoStack.current = []
     while (undoStack.current.length > UNDO_CAP) {
       finalizeDelete(undoStack.current.shift()!)
     }
@@ -529,11 +554,26 @@ export function PageCanvas({
   //live geometry update, keep the ref in sync so a commit right after a gesture
   //reads the final geometry. does not record undo, the gesture's begin/commit
   //pair does that once on release
-  function updateBox(id: string, patch: Partial<BoxMeta>) {
-    boxesRef.current = boxesRef.current.map((b) => (b.id === id ? { ...b, ...patch } : b))
-    setBoxes(boxesRef.current)
-    scheduleSave()
-  }
+function updateBox(id: string, patch: Partial<BoxMeta>) {
+  boxesRef.current = boxesRef.current.map((b) => (b.id === id ? { ...b, ...patch } : b))
+  setBoxes(boxesRef.current)
+  scheduleSave()
+}
+
+function addBoxes(newBoxes: BoxMeta[], html?: Record<string, string>) {
+  if (!newBoxes.length) return
+  if (html) Object.assign(boxHtml.current, html)
+  boxesRef.current = [...boxesRef.current, ...newBoxes]
+  setBoxes(boxesRef.current)
+  pushUndo({ type: 'add', boxes: newBoxes.map((b) => ({ ...b })), html })
+  scheduleSave()
+}
+
+function removeBoxes(ids: string[]) {
+  const dead = new Set(ids)
+  boxesRef.current = boxesRef.current.filter((b) => !dead.has(b.id))
+  setBoxes(boxesRef.current)
+}
 
   //pin a box left/right (or unpin with null). justifying left also parks its
   //stored x at 0 so unjustifying leaves it there rather than jumping back
@@ -583,7 +623,7 @@ export function PageCanvas({
     //record the deletion for undo, keep the file and url around in case it comes
     //back. pushUndo evicts the oldest action past the cap and makes it permanent
     pushUndo({ type: 'delete', box: { ...box }, html: boxHtml.current[id] })
-    setBoxes((bs) => bs.filter((b) => b.id !== id))
+  removeBoxes([id])
     scheduleSave()
   }
 
@@ -623,12 +663,21 @@ export function PageCanvas({
   function undo() {
     const action = undoStack.current.pop()
     if (!action) return
-    if (action.type === 'delete') {
-      if (action.html !== undefined) boxHtml.current[action.box.id] = action.html
-      setBoxes((bs) => [...bs, action.box])
-    } else if (action.type === 'order') {
-      applyMove(action.id, action.from)
-    } else {
+  if (action.type === 'delete') {
+    if (action.html !== undefined) boxHtml.current[action.box.id] = action.html
+    boxesRef.current = [...boxesRef.current, action.box]
+    setBoxes(boxesRef.current)
+  } else if (action.type === 'deleteMany') {
+    if (action.html) {
+      for (const [id, html] of Object.entries(action.html)) boxHtml.current[id] = html
+    }
+    boxesRef.current = [...boxesRef.current, ...action.boxes]
+    setBoxes(boxesRef.current)
+  } else if (action.type === 'add') {
+    removeBoxes(action.boxes.map((b) => b.id))
+  } else if (action.type === 'order') {
+    applyMove(action.id, action.from)
+  } else {
       updateBox(action.id, action.before)
     }
     redoStack.current.push(action)
@@ -640,11 +689,19 @@ export function PageCanvas({
   function redo() {
     const action = redoStack.current.pop()
     if (!action) return
-    if (action.type === 'delete') {
-      setBoxes((bs) => bs.filter((b) => b.id !== action.box.id))
-    } else if (action.type === 'order') {
-      applyMove(action.id, action.to)
-    } else {
+  if (action.type === 'delete') {
+    removeBoxes([action.box.id])
+  } else if (action.type === 'deleteMany') {
+    removeBoxes(action.boxes.map((b) => b.id))
+  } else if (action.type === 'add') {
+    if (action.html) {
+      for (const [id, html] of Object.entries(action.html)) boxHtml.current[id] = html
+    }
+    boxesRef.current = [...boxesRef.current, ...action.boxes]
+    setBoxes(boxesRef.current)
+  } else if (action.type === 'order') {
+    applyMove(action.id, action.to)
+  } else {
       updateBox(action.id, action.after)
     }
     undoStack.current.push(action)
@@ -664,18 +721,43 @@ export function PageCanvas({
 
   //convert a viewport point into canvas content coordinates, matching the
   //create-box math so a dropped file lands under the pointer
-  function contentPoint(clientX: number, clientY: number) {
-    if (!contentEl) return { x: 0, y: 0 }
-    const rect = contentEl.getBoundingClientRect()
-    return {
-      x: clientX - rect.left + contentEl.scrollLeft - BOX_PAD_X,
-      y: clientY - rect.top + contentEl.scrollTop - BOX_PAD_Y,
-    }
-  }
+function contentPoint(clientX: number, clientY: number) {
+ if (!contentEl) return { x: 0, y: 0 }
+ const rect = contentEl.getBoundingClientRect()
+ return {
+  x: clientX - rect.left + contentEl.scrollLeft - BOX_PAD_X,
+  y: clientY - rect.top + contentEl.scrollTop - BOX_PAD_Y,
+ }
+}
+
+function escapeHtml(text: string) {
+ return text
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;')
+}
+
+function textToHtml(text: string) {
+ return escapeHtml(text)
+  .split(/\r?\n/)
+  .map((line) => line || '<br>')
+  .join('<br>')
+}
+
+function addTextBox(html: string, x: number, y: number) {
+ const box: BoxMeta = { id: rid(), x: Math.max(0, x), y: Math.max(0, y), html }
+ addBoxes([box], { [box.id]: html })
+ setFocusId(box.id)
+}
 
   //a pending attachment/printout prompt for the current non-image file
   const [pending, setPending] = useState<{ name: string; canPrintout: boolean } | null>(null)
   const choiceResolver = useRef<((c: ImportChoice | null) => void) | null>(null)
+  const [printoutConfirm, setPrintoutConfirm] = useState<{
+    pages: number
+    resolve: (ok: boolean) => void
+  } | null>(null)
 
   //open the prompt and resolve once the user picks (or dismisses)
   function askImportChoice(name: string, canPrintout: boolean): Promise<ImportChoice | null> {
@@ -688,6 +770,16 @@ export function PageCanvas({
     setPending(null)
     choiceResolver.current?.(choice)
     choiceResolver.current = null
+  }
+
+  function confirmLargePrintout(pages: number): Promise<boolean> {
+    if (pages <= PRINTOUT_WARN_PAGES) return Promise.resolve(true)
+    return new Promise((resolve) => setPrintoutConfirm({ pages, resolve }))
+  }
+
+  function resolvePrintoutConfirm(ok: boolean) {
+    printoutConfirm?.resolve(ok)
+    setPrintoutConfirm(null)
   }
 
   //import dropped or picked files onto the canvas. images insert silently as
@@ -705,8 +797,7 @@ export function PageCanvas({
       const py = Math.max(0, y + offset)
       if (isImage(file)) {
         const box = await importImage(dir, file, px, py)
-        setBoxes((bs) => [...bs, box])
-        scheduleSave()
+        addBoxes([box])
         offset += 24
         continue
       }
@@ -716,22 +807,19 @@ export function PageCanvas({
         //pass the file so the printout also drops the original as an attachment
         //pill centered above its first page
         const pages = await buildPrintoutBoxes(dir, stripExt(file.name), await file.arrayBuffer(), px, py, file)
-        setBoxes((bs) => [...bs, ...pages])
-        scheduleSave()
+        addBoxes(pages)
         offset += 24
         continue
       }
       if (choice === 'pdfwindow' && isPdf(file.type, file.name)) {
         const box = await buildPdfWindowBox(dir, file, px, py)
-        setBoxes((bs) => [...bs, box])
-        scheduleSave()
+        addBoxes([box])
         offset += 24
         continue
       }
       //attachment, or printout fallback for non-pdf files (TODO: docx -> images)
       const box = await importAttachment(dir, file, px, py)
-      setBoxes((bs) => [...bs, box])
-      scheduleSave()
+      addBoxes([box])
       offset += 24
     }
   }
@@ -752,12 +840,7 @@ export function PageCanvas({
     //initial bundle
     const { rasterizePdf } = await import('@/lib/pdfPrintout')
     //confirm before rasterising very long pdfs, each page becomes a stored png
-    const pages = await rasterizePdf(data, (n) =>
-      n <= PRINTOUT_WARN_PAGES ||
-      window.confirm(
-        `This PDF has ${n} pages. Laying them all out will create ${n} images and may be slow. Continue?`,
-      ),
-    )
+    const pages = await rasterizePdf(data, confirmLargePrintout)
     if (!pages.length) return []
     const out: BoxMeta[] = []
     let yy = y
@@ -767,6 +850,7 @@ export function PageCanvas({
       const pillW = 200
       out.push({
         id: rid(),
+        html: '',
         x: Math.max(0, x + DEFAULT_IMG_W / 2 - pillW / 2),
         y: yy,
         kind: 'attachment',
@@ -782,6 +866,7 @@ export function PageCanvas({
       const h = Math.round(DEFAULT_IMG_W / p.aspect)
       out.push({
         id: rid(),
+        html: '',
         x,
         y: yy,
         w: DEFAULT_IMG_W,
@@ -810,6 +895,7 @@ export function PageCanvas({
     const stored = await writeAttachment(dir, file, file.name)
     return {
       id: rid(),
+      html: '',
       x,
       y,
       w: DEFAULT_PDF_W,
@@ -829,6 +915,11 @@ export function PageCanvas({
     if (!dir || !box.file) return
     const file = await readAttachment(dir, box.file)
     if (!file) return
+    const pillW = 200
+    updateBox(box.id, {
+      x: Math.max(0, box.x + DEFAULT_IMG_W / 2 - pillW / 2),
+      y: box.y,
+    })
     const pages = await buildPrintoutBoxes(
       dir,
       stripExt(box.name ?? 'page'),
@@ -836,9 +927,36 @@ export function PageCanvas({
       box.x,
       box.y + 44,
     )
-    setBoxes((bs) => [...bs, ...pages])
+    addBoxes(pages)
+  }
+
+  async function insertPdfWindow(box: BoxMeta) {
+    const dir = pageDir ?? (await ensurePageDir())
+    if (!dir || !box.file) return
+    const file = await readAttachment(dir, box.file)
+    if (!file) return
+    const pdf = await buildPdfWindowBox(dir, file, box.x, box.y + 44)
+    addBoxes([pdf])
+  }
+
+  function deletePrintoutImages(box: BoxMeta) {
+    const base = stripExt(box.name ?? box.file ?? '')
+    if (!base) return
+    const victims = boxesRef.current.filter(
+      (b) => b.kind === 'image' && (b.name ?? '').startsWith(`${base} p`),
+    )
+    if (!victims.length) return
+    pushUndo({ type: 'deleteMany', boxes: victims.map((b) => ({ ...b })) })
+    removeBoxes(victims.map((b) => b.id))
     scheduleSave()
   }
+
+  const [canvasMenu, setCanvasMenu] = useState<{
+    x: number
+    y: number
+    canvasX: number
+    canvasY: number
+  } | null>(null)
   //keep the paste listener pointed at the latest closure (current pageDir etc.)
   importRef.current = importFiles
 
@@ -860,6 +978,100 @@ export function PageCanvas({
     e.preventDefault()
     const { x, y } = contentPoint(e.clientX, e.clientY)
     importFiles(e.dataTransfer.files, x, y)
+  }
+
+  function onCanvasContextMenu(e: React.MouseEvent) {
+    if (e.defaultPrevented) return
+    e.preventDefault()
+    const { x, y } = contentPoint(e.clientX, e.clientY)
+    setCanvasMenu({ x: e.clientX, y: e.clientY, canvasX: Math.max(0, x), canvasY: Math.max(0, y) })
+  }
+
+  async function pasteClipboardImages(menu: { canvasX: number; canvasY: number }) {
+    setCanvasMenu(null)
+    const read = navigator.clipboard?.read
+    if (!read) return
+    try {
+      const items = await read.call(navigator.clipboard)
+      const files: File[] = []
+      for (const item of items) {
+        const type = item.types.find((t) => t.startsWith('image/'))
+        if (!type) continue
+        const blob = await item.getType(type)
+        const ext = type.split('/')[1] || 'png'
+        files.push(new File([blob], `clipboard-image-${Date.now()}.${ext}`, { type }))
+      }
+      if (files.length) await importFiles(files, menu.canvasX, menu.canvasY)
+    } catch {
+      //clipboard permission denied or unsupported; keep native popup out of this flow
+    }
+  }
+
+function copySelection() {
+    setCanvasMenu(null)
+    document.execCommand('copy')
+  }
+
+  function cutSelection() {
+    setCanvasMenu(null)
+    document.execCommand('cut')
+  }
+
+  async function pasteClipboard(menu: { canvasX: number; canvasY: number }) {
+    void pasteClipboardImages
+    setCanvasMenu(null)
+    try {
+      const read = navigator.clipboard?.read
+      if (read) {
+        const items = await read.call(navigator.clipboard)
+        const files: File[] = []
+        let html = ''
+        let text = ''
+
+        for (const item of items) {
+          const imageType = item.types.find((t) => t.startsWith('image/'))
+          if (imageType) {
+            const blob = await item.getType(imageType)
+            const ext = imageType.split('/')[1] || 'png'
+            files.push(new File([blob], `clipboard-image-${Date.now()}.${ext}`, { type: imageType }))
+            continue
+          }
+          if (!html && item.types.includes('text/html')) {
+            html = await (await item.getType('text/html')).text()
+          }
+          if (!text && item.types.includes('text/plain')) {
+            text = await (await item.getType('text/plain')).text()
+          }
+        }
+
+        if (files.length) {
+          await importFiles(files, menu.canvasX, menu.canvasY)
+          return
+        }
+        const content = html || (text ? textToHtml(text) : '')
+        if (content) addTextBox(content, menu.canvasX, menu.canvasY)
+        return
+      }
+
+      const text = await navigator.clipboard?.readText?.()
+      if (text) addTextBox(textToHtml(text), menu.canvasX, menu.canvasY)
+    } catch {
+      //clipboard permission denied or unsupported; keep native popup out this flow
+    }
+  }
+
+  function insertLink(menu: { canvasX: number; canvasY: number }) {
+    setCanvasMenu(null)
+    const raw = window.prompt('Link URL')
+    if (!raw) return
+    const url = raw.trim()
+    if (!url) return
+    const label = window.prompt('Link text', url)?.trim() || url
+    addTextBox(
+      `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`,
+      menu.canvasX,
+      menu.canvasY,
+    )
   }
 
   function onDragOver(e: React.DragEvent) {
@@ -952,7 +1164,8 @@ export function PageCanvas({
   }, [pageName, contentEl, titleHidden])
 
   function resetTitle() {
-    if (titleRef.current) titleRef.current.textContent = pageName
+  if (titleRef.current) titleRef.current.textContent = pageName
+  onTitleDraft?.(pageName)
   }
 
   async function commitTitle() {
@@ -1011,6 +1224,7 @@ export function PageCanvas({
       style={{ '--doc-w': `${docW}px` } as CSSProperties}
       onDragOver={onDragOver}
       onDrop={onDrop}
+      onContextMenu={onCanvasContextMenu}
     >
       <PageEditor key={pageKey} content={docHtml.current} onSave={onDocChange} editorOut={editorCan} />
 
@@ -1069,7 +1283,8 @@ export function PageCanvas({
                   contentEditable
                   suppressContentEditableWarning
                   spellCheck={false}
-                  data-placeholder="Untitled page"
+            data-placeholder="Untitled page"
+            onInput={(e) => onTitleDraft?.((e.currentTarget.textContent ?? '').trim())}
                   onBlur={commitTitle}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
@@ -1133,10 +1348,16 @@ export function PageCanvas({
                     onReorder={(d) => reorderBox(b.id, d)}
                     onJustify={(j, x) => justifyBox(b.id, j, x)}
                     onRemove={() => removeBox(b.id)}
-                    onInsertPrintout={
-                      isPdf(b.mime, b.name) ? () => insertPrintout(b) : undefined
-                    }
-                  />
+          onInsertPrintout={
+            isPdf(b.mime, b.name) ? () => insertPrintout(b) : undefined
+          }
+          onInsertPdfWindow={
+            isPdf(b.mime, b.name) ? () => insertPdfWindow(b) : undefined
+          }
+          onDeletePrintoutImages={
+            isPdf(b.mime, b.name) ? () => deletePrintoutImages(b) : undefined
+          }
+        />
                 ) : (
                   <Box
                     key={b.id}
@@ -1163,11 +1384,40 @@ export function PageCanvas({
         <TitleMenu menu={titleMenu} onClose={() => setTitleMenu(null)} onHide={hideTitle} />
       )}
 
+      {canvasMenu && (
+        <CanvasMenu
+          menu={canvasMenu}
+          onClose={() => setCanvasMenu(null)}
+          onCopy={copySelection}
+          onCut={cutSelection}
+          onPaste={() => pasteClipboard(canvasMenu)}
+          onInsertLink={() => insertLink(canvasMenu)}
+        />
+      )}
+
       <ImportChoiceDialog
         fileName={pending?.name ?? null}
         canPrintout={pending?.canPrintout ?? false}
         onChoose={resolveChoice}
       />
+
+      <Dialog open={!!printoutConfirm} onOpenChange={(open) => !open && resolvePrintoutConfirm(false)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Large PDF printout</DialogTitle>
+            <DialogDescription>
+              This PDF has {printoutConfirm?.pages ?? 0} pages. Laying them out will create{' '}
+              {printoutConfirm?.pages ?? 0} images and may be slow.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => resolvePrintoutConfirm(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => resolvePrintoutConfirm(true)}>Continue</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -1207,6 +1457,60 @@ function TitleMenu({
       >
         <EyeOff className="size-4 shrink-0 text-muted-foreground" aria-hidden />
         Hide title area
+      </button>
+    </div>
+  )
+}
+
+function CanvasMenu({
+  menu,
+  onClose,
+  onCopy,
+  onCut,
+  onPaste,
+  onInsertLink,
+}: {
+  menu: { x: number; y: number }
+  onClose: () => void
+  onCopy: () => void
+  onCut: () => void
+  onPaste: () => void
+  onInsertLink: () => void
+}) {
+  useEffect(() => {
+    const close = () => onClose()
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  return (
+    <div
+      role="menu"
+      className="fixed z-50 min-w-44 overflow-hidden rounded-md border border-border bg-popover py-1 text-sm shadow-md"
+      style={{ left: menu.x, top: menu.y }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <button role="menuitem" onClick={onCopy} className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left outline-none hover:bg-accent">
+        <Copy className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Copy
+      </button>
+      <button role="menuitem" onClick={onCut} className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left outline-none hover:bg-accent">
+        <Scissors className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Cut
+      </button>
+      <button role="menuitem" onClick={onPaste} className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left outline-none hover:bg-accent">
+        <ClipboardPaste className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Paste
+      </button>
+      <div className="my-1 border-t border-border" />
+      <button role="menuitem" onClick={onInsertLink} className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left outline-none hover:bg-accent">
+        <LinkIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        Insert link
       </button>
     </div>
   )
@@ -1954,6 +2258,8 @@ function AttachmentBox({
   onJustify,
   onRemove,
   onInsertPrintout,
+  onInsertPdfWindow,
+  onDeletePrintoutImages,
 }: {
   box: BoxMeta
   url?: string
@@ -1964,6 +2270,8 @@ function AttachmentBox({
   onJustify: (j: JustifyDir | null, x?: number) => void
   onRemove: () => void
   onInsertPrintout?: () => void
+  onInsertPdfWindow?: () => void
+  onDeletePrintoutImages?: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
@@ -2036,10 +2344,14 @@ function AttachmentBox({
         <AttachmentMenu
           menu={menu}
           canPrintout={!!onInsertPrintout}
+          canPdfWindow={!!onInsertPdfWindow}
+          canDeletePrintout={!!onDeletePrintoutImages}
           justify={box.justify}
           onClose={() => setMenu(null)}
           onOpen={open}
           onInsertPrintout={() => onInsertPrintout?.()}
+          onInsertPdfWindow={() => onInsertPdfWindow?.()}
+          onDeletePrintoutImages={() => onDeletePrintoutImages?.()}
           onReorder={onReorder}
           onJustify={(j) => onJustify(j, j === null ? justifiedX(ref.current, box.justify) : undefined)}
           onRemove={onRemove}
@@ -2053,20 +2365,28 @@ function AttachmentBox({
 function AttachmentMenu({
   menu,
   canPrintout,
+  canPdfWindow,
+  canDeletePrintout,
   justify,
   onClose,
   onOpen,
   onInsertPrintout,
+  onInsertPdfWindow,
+  onDeletePrintoutImages,
   onReorder,
   onJustify,
   onRemove,
 }: {
   menu: { x: number; y: number }
   canPrintout: boolean
+  canPdfWindow: boolean
+  canDeletePrintout: boolean
   justify?: JustifyDir
   onClose: () => void
   onOpen: () => void
   onInsertPrintout: () => void
+  onInsertPdfWindow: () => void
+  onDeletePrintoutImages: () => void
   onReorder: (d: ReorderDir) => void
   onJustify: (j: JustifyDir | null) => void
   onRemove: () => void
@@ -2101,10 +2421,25 @@ function AttachmentMenu({
           Insert as printout
         </button>
       )}
+      {canPdfWindow && (
+        <button role="menuitem" className={item} onClick={() => { onInsertPdfWindow(); onClose() }}>
+          <ScrollText className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          Insert as PDF window
+        </button>
+      )}
       <div className="my-1 border-t border-border" />
       <LayerActions onReorder={onReorder} onClose={onClose} />
       <div className="my-1 border-t border-border" />
       <JustifyActions justify={justify} onJustify={onJustify} onClose={onClose} />
+      {canDeletePrintout && (
+        <>
+          <div className="my-1 border-t border-border" />
+          <button role="menuitem" className={item} onClick={() => { onDeletePrintoutImages(); onClose() }}>
+            <Trash2 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            Delete printout images
+          </button>
+        </>
+      )}
       <div className="my-1 border-t border-border" />
       <button
         role="menuitem"
@@ -3073,7 +3408,12 @@ function PdfScroll({
           if (viewRef) viewRef.current = el
         }}
         className="canvas-pdf-scroll"
-        style={interacting ? { pointerEvents: 'none' } : undefined}
+        style={
+          {
+            ...(interacting ? { pointerEvents: 'none' } : {}),
+            '--pdf-page-digits': String(Math.max(String(aspects.length || 1).length, 1)),
+          } as CSSProperties
+        }
         onScroll={onScroll}
       >
         {ready && width > 0 ? (
@@ -3584,6 +3924,8 @@ function BoxMenu({
       onPointerDown={(e) => e.stopPropagation()}
     >
       <LayerActions onReorder={onReorder} onClose={onClose} />
+      <div className="my-1 border-t border-border" />
+      <JustifyActions justify={justify} onJustify={onJustify} onClose={onClose} />
       <div className="my-1 border-t border-border" />
       <button
         role="menuitem"

@@ -108,10 +108,10 @@ export async function renderPdfPage(
 //(return false) for very large documents
 export async function rasterizePdf(
   data: ArrayBuffer,
-  shouldContinue?: (numPages: number) => boolean,
+  shouldContinue?: (numPages: number) => boolean | Promise<boolean>,
 ): Promise<PrintoutPage[]> {
   const pdf = await pdfjs.getDocument({ data }).promise
-  if (shouldContinue && !shouldContinue(pdf.numPages)) return []
+  if (shouldContinue && !(await shouldContinue(pdf.numPages))) return []
   //legible without being huge, clamped by the max edge below
   const base = Math.min(2, (window.devicePixelRatio || 1) * 1.5)
   const pages: PrintoutPage[] = []

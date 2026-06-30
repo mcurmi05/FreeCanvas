@@ -40,6 +40,7 @@ export async function importAttachment(
   const stored = await writeAttachment(pageDir, file, file.name)
   return {
     id: rid(),
+    html: '',
     x,
     y,
     kind: 'attachment',
@@ -60,6 +61,7 @@ export async function importImage(
   const stored = await writeAttachment(pageDir, file, file.name)
   return {
     id: rid(),
+    html: '',
     x,
     y,
     kind: 'image',

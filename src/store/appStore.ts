@@ -124,6 +124,15 @@ function remapPath(path: string, oldPrefix: string, newPrefix: string): string {
   return path
 }
 
+function renameTreeDraft(nodes: PageNode[], path: string, newPath: string, name: string): PageNode[] {
+  return nodes.map((node) => ({
+    ...node,
+    name: node.path === path ? name : node.name,
+    path: remapPath(node.path, path, newPath),
+    children: renameTreeDraft(node.children, path, newPath, name),
+  }))
+}
+
 //shared loader, remember the library and pull its notebooks
 async function loadLibrary(
   set: (partial: Partial<AppState>) => void,
@@ -472,6 +481,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       //no native rename, copy to the new disk name then remove the old one
       const oldDisk = diskName(node)
       const newDisk = node.dirHandle ? name : name + PAGE_EXT
+      const newPath = parentPath ? `${parentPath}/${name}` : name
+      const optimisticTree = renameTreeDraft(tree, path, newPath, name)
+      const active = get().activePage
+      const optimisticActive = active
+        ? findNode(optimisticTree, remapPath(active.path, path, newPath))
+        : null
+      set({ pageTree: optimisticTree, activePage: optimisticActive ?? active })
       const srcHandle = node.dirHandle ?? node.fileHandle
       if (!srcHandle) {
         set({ loading: false })
@@ -486,12 +502,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       await writeOrder(dir, order)
 
       const pageTree = await listPageTree(notebook.handle)
-      const newPath = parentPath ? `${parentPath}/${name}` : name
-      const active = get().activePage
-      const refreshed = active
-        ? findNode(pageTree, remapPath(active.path, path, newPath))
+      const currentActive = get().activePage
+      const refreshed = currentActive
+        ? findNode(pageTree, remapPath(currentActive.path, path, newPath))
         : null
-      set({ pageTree, activePage: refreshed ?? active, loading: false })
+      set({ pageTree, activePage: refreshed ?? currentActive, loading: false })
       return true
     } catch (err) {
       set({ loading: false, error: (err as Error).message })

@@ -52,6 +52,7 @@ interface TreeContext {
   openMenu: (e: React.MouseEvent, node: PageNode | null) => void
   draggingPath: string | null
   setDraggingPath: (path: string | null) => void
+  titleDraft: { path: string; name: string } | null
 }
 
 const TreeCtx = createContext<TreeContext | null>(null)
@@ -150,6 +151,11 @@ export function NotebookScreen() {
   //the title's current visibility so the menu can label show vs hide
   const [toggleTitleNonce, setToggleTitleNonce] = useState(0)
   const [activeTitleHidden, setActiveTitleHidden] = useState(false)
+  const [titleDraft, setTitleDraft] = useState<{ path: string; name: string } | null>(null)
+
+  useEffect(() => {
+    setTitleDraft(null)
+  }, [activePage?.path])
 
   //sidebar width and collapsed state survive reloads
   const [width, setWidth] = useState(() => {
@@ -272,7 +278,7 @@ export function NotebookScreen() {
             </Button>
           </div>
 
-          <TreeCtx.Provider value={{ openMenu, draggingPath, setDraggingPath }}>
+          <TreeCtx.Provider value={{ openMenu, draggingPath, setDraggingPath, titleDraft }}>
             <div
               className="min-h-12 flex-1 overflow-y-auto px-2 pb-3"
               //let the empty area accept drops back to the root level
@@ -344,7 +350,12 @@ export function NotebookScreen() {
             //bind the save to this page so a debounced flush that lands after a
             //switch writes this file, not whatever page became active meanwhile
             onSave={(html) => savePage(html, activePage)}
-            onRenamePage={(name) => renameNode(activePage.path, name)}
+            onRenamePage={async (name) => {
+              const ok = await renameNode(activePage.path, name)
+              if (ok) setTitleDraft(null)
+              return ok
+            }}
+            onTitleDraft={(name) => setTitleDraft({ path: activePage.path, name })}
             toggleTitleNonce={toggleTitleNonce}
             onTitleHiddenChange={setActiveTitleHidden}
           />
@@ -561,6 +572,8 @@ function PageTreeItem({ node }: { node: PageNode }) {
   const activePage = useAppStore((s) => s.activePage)
   const openPage = useAppStore((s) => s.openPage)
   const moveNode = useAppStore((s) => s.moveNode)
+  const displayName =
+    ctx.titleDraft?.path === node.path ? ctx.titleDraft.name || 'Untitled page' : node.name
   const [collapsed, setCollapsed] = useState(false)
   //the live drop position while a drag hovers this row, null when not hovered
   const [dropPos, setDropPos] = useState<DropPosition | null>(null)
@@ -660,7 +673,7 @@ function PageTreeItem({ node }: { node: PageNode }) {
             )}
           >
             <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-            <span className="truncate">{node.name}</span>
+          <span className="truncate">{displayName}</span>
           </button>
         </div>
       </div>
