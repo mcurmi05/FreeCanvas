@@ -100,6 +100,11 @@ const BOX_PAD_Y = 8
 //(right margin) sits at this + docW, used to right-justify boxes to it
 const DOC_LEFT_PAD = 40
 
+//remembers each pdf window's reading position (slideshow page / scroll offset)
+//across canvas remounts: a page rename changes the react key and would
+//otherwise reset every pdf window to page 1
+const pdfViewMemory = new Map<string, { page?: number; scroll?: number }>()
+
 //the creation date and time, shown under the title the way onenote does
 function formatCreated(iso: string): { date: string; time: string } {
   const d = new Date(iso)
@@ -475,6 +480,23 @@ function pushUndo(action: UndoAction) {
     return () => el.removeEventListener('paste', onPaste, true)
   }, [])
 
+  //clicking a link anywhere on the page (document or a canvas box) opens it in
+  //a new tab; contentEditables swallow navigation otherwise
+  useEffect(() => {
+    const el = wrapper.current
+    if (!el) return
+    function onClick(e: MouseEvent) {
+      const a = (e.target as HTMLElement).closest?.('a[href]') as HTMLAnchorElement | null
+      if (!a) return
+      const href = a.href
+      if (!href || href.startsWith('javascript:')) return
+      e.preventDefault()
+      window.open(href, '_blank', 'noopener')
+    }
+    el.addEventListener('click', onClick)
+    return () => el.removeEventListener('click', onClick)
+  }, [])
+
   //undo/redo box deletions with the usual shortcuts. listens on the window so it
   //fires wherever focus landed after a delete. a pending box deletion takes
   //precedence over the editor's own undo (you just deleted something, bring it
@@ -548,9 +570,12 @@ function pushUndo(action: UndoAction) {
         t.closest('.canvas-box') ||
         t.closest('.page-title') ||
         t.closest('.doc-width-bar') ||
-        //the editor's inline link/video/formula panel is portaled onto the
-        //canvas, clicking it must not spawn a text box under it
-        t.closest('.rte-embed-popover')
+        //the editor's inline link/video/formula panel, the hovering mini
+        //toolbar and the code-block ⋯ button are portaled onto the canvas,
+        //clicking them must not spawn a text box underneath
+        t.closest('.rte-embed-popover') ||
+        t.closest('.rte-mini-toolbar') ||
+        t.closest('.rte-code-dots')
       )
         return
       const rect = contentEl!.getBoundingClientRect()
@@ -873,13 +898,15 @@ function addTextBox(html: string, x: number, y: number) {
     let yy = y
     if (attachFile) {
       const stored = await writeAttachment(dir, attachFile, attachFile.name)
-      //estimate the pill width to roughly center it over the page column
+      //fixed pill width so it is exactly centered over the page column (an
+      //auto-sized pill varies with the file name and lands off-center)
       const pillW = 200
       out.push({
         id: rid(),
         html: '',
         x: Math.max(0, x + DEFAULT_IMG_W / 2 - pillW / 2),
         y: yy,
+        w: pillW,
         kind: 'attachment',
         file: stored,
         mime: attachFile.type,
@@ -946,6 +973,7 @@ function addTextBox(html: string, x: number, y: number) {
     updateBox(box.id, {
       x: Math.max(0, box.x + DEFAULT_IMG_W / 2 - pillW / 2),
       y: box.y,
+      w: pillW,
     })
     const pages = await buildPrintoutBoxes(
       dir,
@@ -957,6 +985,23 @@ function addTextBox(html: string, x: number, y: number) {
     addBoxes(pages)
   }
 
+  //right-click a pdf window -> drop an attachment pill for its file below it
+  function insertAttachmentPill(box: BoxMeta) {
+    if (!box.file) return
+    addBoxes([
+      {
+        id: rid(),
+        html: '',
+        x: box.x,
+        y: box.y + (box.h ?? DEFAULT_PDF_W) + 12,
+        kind: 'attachment',
+        file: box.file,
+        mime: box.mime,
+        name: box.name,
+      },
+    ])
+  }
+
   async function insertPdfWindow(box: BoxMeta) {
     const dir = pageDir ?? (await ensurePageDir())
     if (!dir || !box.file) return
@@ -964,6 +1009,13 @@ function addTextBox(html: string, x: number, y: number) {
     if (!file) return
     const pdf = await buildPdfWindowBox(dir, file, box.x, box.y + 44)
     addBoxes([pdf])
+  }
+
+  //true while the page still holds images produced by this attachment's
+  //printout, drives whether the menu offers deleting them
+  function hasPrintoutImages(box: BoxMeta) {
+    const base = stripExt(box.name ?? box.file ?? '')
+    return !!base && boxes.some((b) => b.kind === 'image' && (b.name ?? '').startsWith(`${base} p`))
   }
 
   function deletePrintoutImages(box: BoxMeta) {
@@ -1285,7 +1337,9 @@ function copySelection() {
         className="hidden"
         onChange={onPickFiles}
       />
-      <div className="absolute right-4 top-0 z-20 flex h-12 items-center">
+      {/*z-60: the editor toolbar is z-50 and spans the full width, anything
+         lower never receives the click*/}
+      <div className="absolute right-4 top-0 z-[60] flex h-12 items-center">
         <button
           type="button"
           onClick={() => fileInput.current?.click()}
@@ -1372,6 +1426,7 @@ function copySelection() {
                     onGeomCommit={() => commitGeom(b.id)}
                     onReorder={(d) => reorderBox(b.id, d)}
                     onJustify={(j, x) => justifyBox(b.id, j, x)}
+                    onInsertAttachment={() => insertAttachmentPill(b)}
                     onRemove={() => removeBox(b.id)}
                   />
                 ) : b.kind === 'image' ? (
@@ -1404,7 +1459,9 @@ function copySelection() {
             isPdf(b.mime, b.name) ? () => insertPdfWindow(b) : undefined
           }
           onDeletePrintoutImages={
-            isPdf(b.mime, b.name) ? () => deletePrintoutImages(b) : undefined
+            isPdf(b.mime, b.name) && hasPrintoutImages(b)
+              ? () => deletePrintoutImages(b)
+              : undefined
           }
         />
                 ) : (
@@ -2365,6 +2422,9 @@ function AttachmentBox({
       style={{
         left: box.x,
         top: box.y,
+        //a stored width pins the pill's size (printout pills use it so the
+        //centering math over the page column is exact)
+        ...(box.w ? { width: box.w } : {}),
         transform: box.justify === 'right' ? 'translateX(-100%)' : undefined,
       }}
       tabIndex={0}
@@ -2518,6 +2578,7 @@ function PdfBox({
   onGeomCommit,
   onReorder,
   onJustify,
+  onInsertAttachment,
   onRemove,
 }: {
   box: BoxMeta
@@ -2527,6 +2588,7 @@ function PdfBox({
   onGeomCommit: () => void
   onReorder: (d: ReorderDir) => void
   onJustify: (j: JustifyDir | null, x?: number) => void
+  onInsertAttachment?: () => void
   onRemove: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -2553,10 +2615,12 @@ function PdfBox({
   //while dragging/resizing the iframe must not eat pointer events or the gesture
   //stalls the moment the cursor crosses into the pdf
   const [interacting, setInteracting] = useState(false)
+  //where this window's reading position survives remounts, keyed by its file
+  const memKey = box.file ?? box.id
   //slideshow paging state, only used in 'slides' mode. count comes from the
   //loaded pdf, kept in a ref too so the keyboard stepper can clamp without a
   //stale closure
-  const [slidePage, setSlidePage] = useState(1)
+  const [slidePage, setSlidePage] = useState(() => pdfViewMemory.get(memKey)?.page ?? 1)
   const [slideCount, setSlideCount] = useState(0)
   const slideCountRef = useRef(0)
   //thumbnail sidebar open, and the editable page-number field's draft text
@@ -2612,6 +2676,12 @@ function PdfBox({
   useEffect(() => {
     setPageInput(String(slidePage))
   }, [slidePage])
+  //remember the slideshow page so a canvas remount (e.g. page rename) resumes here
+  useEffect(() => {
+    const m = pdfViewMemory.get(memKey) ?? {}
+    m.page = slidePage
+    pdfViewMemory.set(memKey, m)
+  }, [slidePage, memKey])
   //commit a typed page number: clamp into [1, count] (over the max just goes to
   //the last page). always rewrite the field to the clamped value, even when the
   //page didn't change, so an out-of-range entry never lingers in the input
@@ -2988,6 +3058,12 @@ function PdfBox({
           sidebarRender={sidebarMounted}
           thumbReady={thumbReady}
           interacting={interacting}
+          initialScroll={pdfViewMemory.get(memKey)?.scroll}
+          onScrollMemo={(top) => {
+            const m = pdfViewMemory.get(memKey) ?? {}
+            m.scroll = top
+            pdfViewMemory.set(memKey, m)
+          }}
           onCount={onSlideCount}
           onZoom={zoomBy}
           onPageSize={(pw, ph) => (pageSizeRef.current = { w: pw, h: ph })}
@@ -3077,6 +3153,7 @@ function PdfBox({
           onFitWholePdf={fitWholePdf}
           onReorder={onReorder}
           onJustify={(j) => onJustify(j, j === null ? justifiedX(ref.current, box.justify) : undefined)}
+          onInsertAttachment={onInsertAttachment}
           onRemove={onRemove}
         />
       )}
@@ -3249,6 +3326,8 @@ function PdfScroll({
   sidebarRender,
   thumbReady,
   interacting,
+  initialScroll,
+  onScrollMemo,
   onCount,
   onZoom,
   onPageSize,
@@ -3264,6 +3343,9 @@ function PdfScroll({
   thumbReady: boolean
   //while the window is being dragged/resized the viewer must not eat the gesture
   interacting: boolean
+  //scroll offset to resume at after a remount, and where to report changes
+  initialScroll?: number
+  onScrollMemo?: (top: number) => void
   onCount: (n: number) => void
   onZoom: (factor: number) => void
   onPageSize: (cssW: number, cssH: number) => void
@@ -3409,6 +3491,7 @@ function PdfScroll({
     const el = wrapRef.current
     if (!el) return
     const top = el.scrollTop
+    onScrollMemo?.(top)
     const slots = slotRefs.current
     for (let i = 0; i < slots.length; i++) {
       const s = slots[i]
@@ -3429,6 +3512,18 @@ function PdfScroll({
     if (!s) return
     el.scrollTop = s.offsetTop + anchor.current.frac * s.offsetHeight
   }, [zoom, width])
+
+  //resume the remembered scroll offset once the slots have reserved their
+  //heights (runs after the anchor effect above so it wins the first layout)
+  const restoredScroll = useRef(false)
+  useLayoutEffect(() => {
+    if (restoredScroll.current || initialScroll == null || !ready || width < 2) return
+    const el = wrapRef.current
+    if (!el) return
+    restoredScroll.current = true
+    el.scrollTop = initialScroll
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, width])
 
   function jump(n: number) {
     const el = wrapRef.current
@@ -3708,6 +3803,7 @@ function PdfMenu({
   onFitWholePdf,
   onReorder,
   onJustify,
+  onInsertAttachment,
   onRemove,
 }: {
   menu: { x: number; y: number }
@@ -3720,6 +3816,7 @@ function PdfMenu({
   onFitWholePdf: () => void
   onReorder: (d: ReorderDir) => void
   onJustify: (j: JustifyDir | null) => void
+  onInsertAttachment?: () => void
   onRemove: () => void
 }) {
   useEffect(() => {
@@ -3763,6 +3860,12 @@ function PdfMenu({
         <button role="menuitem" className={item} onClick={() => { onFitWholePdf(); onClose() }}>
           <StretchVertical className="size-4 shrink-0 text-muted-foreground" aria-hidden />
           Extend to whole PDF
+        </button>
+      )}
+      {onInsertAttachment && (
+        <button role="menuitem" className={item} onClick={() => { onInsertAttachment(); onClose() }}>
+          <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          Add attachment pill
         </button>
       )}
       <div className="my-1 border-t border-border" />
@@ -3911,11 +4014,17 @@ function Box({ box, autoFocus, initialHtml, initialStyle, onInput, onMove, onRes
           contentEditable
           suppressContentEditableWarning
           onPointerDown={(e) => e.stopPropagation()}
-          //escape deselects, blur drops focus and clears the selection
+          //escape deselects, blur drops focus and clears the selection. tab
+          //indents instead of tabbing focus away (to the mini toolbar)
           onKeyDown={(e) => {
             if (e.key === 'Escape') {
               e.preventDefault()
               ;(e.currentTarget as HTMLElement).blur()
+            } else if (e.key === 'Tab') {
+              e.preventDefault()
+              if (!e.shiftKey) {
+                document.execCommand('insertHTML', false, '    ')
+              }
             }
           }}
           onInput={(e) => {

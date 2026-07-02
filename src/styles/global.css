@@ -271,7 +271,8 @@
   overflow: visible;
   border: 0;
   border-bottom: 1px solid var(--border);
-  padding: 6px 10px;
+  /*right padding reserves the corner where the import button floats (z-60)*/
+  padding: 6px 104px 6px 10px;
   white-space: nowrap;
 }
 
@@ -436,22 +437,32 @@
   width: 120px;
 }
 
-.editor-fill .rte-combo-wide .rte-size-input {
-  width: 108px;
+/*hovering mini toolbar shown above canvas-box text while editing*/
+.rte-mini-toolbar {
+  position: absolute;
+  z-index: 60;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.14);
 }
 
-.editor-fill .rte-combo-wide .rte-combo-popover {
-  width: 150px;
+.rte-mini-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
 }
 
-/*narrower trigger for the code theme menu*/
-.editor-fill .rte-menu-narrow,
-.editor-fill .rte-menu-narrow .rte-font-trigger {
-  width: 128px !important;
-}
-
-.editor-fill .rte-menu-narrow .rte-font-popover {
-  width: 170px;
+.rte-mini-toolbar button:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
 }
 
 .editor-fill .rte-native-select:focus-visible,
@@ -571,6 +582,107 @@
   font-family: 'Source Code Pro', 'Courier New', monospace;
   font-size: 0.9rem;
   line-height: 1.45;
+}
+
+/*hide quill's own language select, the ⋯ menu replaces it*/
+.editor-fill .ql-code-block-container .ql-ui {
+  display: none;
+}
+
+/*⋯ config button floated over the code block holding the caret (overlaid from
+  outside the editor dom: quill strips foreign nodes injected into a block)*/
+.rte-code-dots {
+  position: absolute;
+  z-index: 60;
+  width: 26px;
+  height: 22px;
+  border-radius: 5px;
+  font-size: 0.95rem;
+  line-height: 1;
+  background: rgb(127 127 127 / 0.28);
+  color: #f9fafb;
+  user-select: none;
+}
+
+.rte-code-dots:hover {
+  background: rgb(127 127 127 / 0.5);
+}
+
+/*the ⋯ menu: language list, theme list, delete*/
+.rte-code-menu {
+  position: fixed;
+  z-index: 70;
+  width: 200px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.16);
+}
+
+.rte-code-menu-label {
+  padding: 4px 8px 2px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+}
+
+.rte-code-menu-list {
+  max-height: 150px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.rte-code-menu-themes {
+  max-height: none;
+}
+
+.rte-code-menu-list button,
+.rte-code-menu-delete {
+  display: flex;
+  width: 100%;
+  padding: 4px 8px;
+  border-radius: 5px;
+  text-align: left;
+  font-size: 0.8125rem;
+}
+
+.rte-code-menu-list button:hover,
+.rte-code-menu-delete:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.rte-code-menu-list button.is-selected {
+  background: var(--accent);
+  font-weight: 600;
+}
+
+.rte-code-menu-sep {
+  margin: 4px 0;
+  height: 1px;
+  background: var(--border);
+}
+
+.rte-code-menu-delete {
+  color: #dc2626;
+}
+
+/*plain code blocks inside canvas text boxes (no highlighting)*/
+.canvas-box-text pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #111827;
+  color: #f9fafb;
+  font-family: 'Source Code Pro', 'Courier New', monospace;
+  font-size: 0.85em;
+  line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 /*validator error pinned under the code block via its data attribute*/
@@ -887,6 +999,10 @@
   border-radius: 4px;
   cursor: pointer;
   outline: none;
+  /*never wider than the rail (a scrollbar can shrink it), so the preview can't
+    spill over the active ring*/
+  width: 100%;
+  min-width: 0;
 }
 
 .canvas-pdf-thumb:hover {
@@ -903,6 +1019,10 @@
 .canvas-pdf-thumb-canvas {
   display: block;
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
+  /*clamp to the thumb's inner width; height follows the bitmap's aspect
+    (!important beats the inline height set at render time)*/
+  max-width: 100%;
+  height: auto !important;
 }
 
 .canvas-pdf-thumb-ph {

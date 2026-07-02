@@ -55,6 +55,7 @@ import themeNord from 'highlight.js/styles/nord.css?inline'
 import * as katex from 'katex'
 import { Scope, StyleAttributor } from 'parchment'
 import Quill from 'quill'
+import { shortcutLabel } from '@/lib/platform'
 import '@fontsource/caladea/400.css'
 import '@fontsource/caladea/700.css'
 import '@fontsource/carlito/400.css'
@@ -108,7 +109,18 @@ const FONT_OPTIONS = [
 ]
 const DEFAULT_FONT_VALUE = FONT_OPTIONS[0].value
 const FONT_SIZES = ['8px', '9px', '10px', '11px', '12px', '14px', DEFAULT_FONT_SIZE, '18px', '20px', '24px', '28px', '32px', '36px', '48px', '72px']
-const LINE_HEIGHTS = ['1', '1.15', '1.25', '1.5', '2', DEFAULT_LINE_HEIGHT, '28px', '32px']
+//px across the board, matching the font sizes (no unitless multipliers)
+const LINE_HEIGHTS = ['16px', '18px', '20px', DEFAULT_LINE_HEIGHT, '28px', '32px', '36px', '48px']
+//first entry resets to the default (labelled with the actual value); the empty
+//value tells the setters to clear the format/inline style entirely
+const FONT_SIZE_OPTIONS = [
+  { label: `${DEFAULT_FONT_SIZE} (default)`, value: '' },
+  ...FONT_SIZES.map((s) => ({ label: s, value: s })),
+]
+const LINE_HEIGHT_OPTIONS = [
+  { label: `${DEFAULT_LINE_HEIGHT} (default)`, value: '' },
+  ...LINE_HEIGHTS.map((s) => ({ label: s, value: s })),
+]
 
 //browsers normalize the inline font-family string (quoting, spacing, case), so
 //matching against the whitelist needs both sides canonicalized first
@@ -302,7 +314,15 @@ function isEditorEmpty(html: string) {
 }
 
 function editorHtml(editor: Quill) {
-  const html = editor.getSemanticHTML()
+  let html = editor.getSemanticHTML()
+  //strip quill's own ql-ui chrome (the code-block language select) so it
+  //never lands in the file
+  if (html.includes('ql-ui')) {
+    const tpl = document.createElement('template')
+    tpl.innerHTML = html
+    tpl.content.querySelectorAll('.ql-ui').forEach((n) => n.remove())
+    html = tpl.innerHTML
+  }
   return isEditorEmpty(html) ? '<p></p>' : html
 }
 
@@ -347,7 +367,8 @@ function normalizeSize(value: string) {
 function normalizeLineHeight(value: string) {
   const trimmed = value.trim()
   if (!trimmed) return DEFAULT_LINE_HEIGHT
-  if (/^\d+(\.\d+)?$/.test(trimmed)) return trimmed
+  //bare numbers are treated as px so the whole control speaks one unit
+  if (/^\d+(\.\d+)?$/.test(trimmed)) return `${trimmed}px`
   if (/^\d+(\.\d+)?(px|pt|em|rem|%)$/.test(trimmed)) return trimmed
   return DEFAULT_LINE_HEIGHT
 }
@@ -630,63 +651,6 @@ function SizeCombo({
   )
 }
 
-//plain dropdown menu (no typing), used for the code theme picker
-function MenuSelect({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string
-  value: string
-  options: { label: string; value: string }[]
-  onChange: (value: string) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const current = options.find((o) => o.value === value) ?? options[0]
-  return (
-    <Tooltip label={label}>
-      <div
-        className="rte-font-menu rte-menu-narrow"
-        onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false)
-        }}
-      >
-        <button
-          type="button"
-          className="rte-font-trigger"
-          aria-label={label}
-          aria-expanded={open}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => setOpen(!open)}
-        >
-          <span>{current.label}</span>
-        </button>
-        {open && (
-          <div className="rte-font-popover" role="listbox">
-            {options.map((o) => (
-              <button
-                key={o.value}
-                type="button"
-                role="option"
-                aria-selected={o.value === value}
-                className={o.value === value ? 'is-selected' : undefined}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => {
-                  onChange(o.value)
-                  setOpen(false)
-                }}
-              >
-                {o.label}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-    </Tooltip>
-  )
-}
-
 function ToolbarColor({
   label,
   shortcut,
@@ -740,6 +704,35 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
   const [codeTheme, setCodeTheme] = useState(DEFAULT_CODE_THEME)
   const [fontOpen, setFontOpen] = useState(false)
   const [embedPopover, setEmbedPopover] = useState<EmbedPopoverState>(null)
+  //when the link/formula popover targets a canvas box, the saved dom range +
+  //element to restore, apply to, and notify on commit
+  const externalEmbed = useRef<{ el: HTMLElement; range: Range } | null>(null)
+  //the box/title the selection last sat in, so toolbar controls that steal
+  //focus (size combos, color inputs) still style the right target
+  const lastExternal = useRef<{ el: HTMLElement; isTitle: boolean } | null>(null)
+  //hovering mini toolbar shown above canvas-box text while editing/highlighting
+  const [miniBar, setMiniBar] = useState<{ x: number; y: number } | null>(null)
+  //the ⋯ button floated above the code block holding the caret. 'doc' blocks
+  //carry their quill range, 'box' blocks (a <pre> in a canvas container) are
+  //tracked via boxPre below
+  const [codeDots, setCodeDots] = useState<{
+    x: number
+    y: number
+    target: 'doc' | 'box'
+    index: number
+    length: number
+    lang: string
+  } | null>(null)
+  const boxPre = useRef<HTMLElement | null>(null)
+  //the per-code-block ⋯ menu: viewport position plus the block's doc range
+  const [codeMenu, setCodeMenu] = useState<{
+    x: number
+    y: number
+    target: 'doc' | 'box'
+    index: number
+    length: number
+    lang: string
+  } | null>(null)
 
   onSaveRef.current = onSave
 
@@ -778,6 +771,100 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
     }
   }, [fontOpen])
 
+  //track the selection and focus: while a canvas box is focused, float the
+  //mini toolbar just above the selection; escape/blur/clicking away hides it.
+  //also remember the last external target so toolbar controls that take focus
+  //(size combos, color inputs) still know what to style
+  useEffect(() => {
+    function update() {
+      const ext = activeExternalText()
+      const mount = mountRef.current
+      const editor = editorRef.current
+      const focused = document.activeElement
+      if (ext) {
+        lastExternal.current = ext
+      } else if (editor && focused && editor.root.contains(focused)) {
+        //typing in the document again, drop the stale box target
+        lastExternal.current = null
+      }
+      const focusInBox =
+        !!ext && !ext.isTitle && !!focused && (focused === ext.el || ext.el.contains(focused))
+      if (!focusInBox || !mount) {
+        setMiniBar(null)
+        //the ⋯ button follows the caret: quill code block or nothing
+        boxPre.current = null
+        setCodeDots(mount ? docCodeDots(mount) : null)
+        return
+      }
+      const sel = window.getSelection()
+      if (!sel || !sel.rangeCount) {
+        setMiniBar(null)
+        return
+      }
+      const range = sel.getRangeAt(0)
+      let rect = range.getBoundingClientRect()
+      //a collapsed caret on an empty line has no rect, fall back to the box
+      if (!rect.width && !rect.height) rect = ext.el.getBoundingClientRect()
+      const mrect = mount.getBoundingClientRect()
+      setMiniBar({
+        x: Math.max(4, rect.left - mrect.left + mount.scrollLeft),
+        y: Math.max(4, rect.top - mrect.top + mount.scrollTop - 42),
+      })
+      //caret inside a container <pre>: float the ⋯ button above it too
+      const node = range.startContainer
+      const anchorEl = node instanceof HTMLElement ? node : node.parentElement
+      const pre = anchorEl?.closest('pre')
+      if (pre && ext.el.contains(pre)) {
+        boxPre.current = pre
+        const prect = pre.getBoundingClientRect()
+        setCodeDots({
+          x: prect.right - mrect.left + mount.scrollLeft - 30,
+          y: Math.max(4, prect.top - mrect.top + mount.scrollTop - 26),
+          target: 'box',
+          index: 0,
+          length: 0,
+          lang: 'plain',
+        })
+      } else {
+        boxPre.current = null
+        setCodeDots(null)
+      }
+    }
+    //focus settles after the event, read it on the next frame
+    let raf = 0
+    function schedule() {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(update)
+    }
+    document.addEventListener('selectionchange', schedule)
+    document.addEventListener('focusin', schedule)
+    document.addEventListener('focusout', schedule)
+    return () => {
+      cancelAnimationFrame(raf)
+      document.removeEventListener('selectionchange', schedule)
+      document.removeEventListener('focusin', schedule)
+      document.removeEventListener('focusout', schedule)
+    }
+  }, [])
+
+  //dismiss the code-block config menu on outside click or escape
+  useEffect(() => {
+    if (!codeMenu) return
+    function onPointerDown(event: PointerEvent) {
+      if ((event.target as HTMLElement).closest?.('.rte-code-menu')) return
+      setCodeMenu(null)
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setCodeMenu(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [codeMenu])
+
   function currentRange(editor: Quill) {
     const range = editor.getSelection()
     if (range) {
@@ -792,6 +879,36 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
     editor.focus()
     editor.setSelection(range, 'silent')
     return range
+  }
+
+  //the ⋯ state for the quill code block holding the caret, null when the
+  //caret isn't in one. the button floats just above the block's top right
+  function docCodeDots(mount: HTMLElement): typeof codeDots {
+    const editor = editorRef.current
+    const range = editor?.getSelection()
+    if (!editor || !range) return null
+    const fmt = editor.getFormat(range.index) as FormatState
+    if (!fmt['code-block']) return null
+    const [line] = editor.getLine(range.index)
+    const lineNode = (line as unknown as { domNode?: HTMLElement } | null)?.domNode
+    const container = lineNode?.closest?.('.ql-code-block-container') as HTMLElement | null
+    const blot = container ? Quill.find(container) : null
+    if (!container || !blot || blot instanceof Quill) return null
+    const index = editor.getIndex(blot as Parameters<Quill['getIndex']>[0])
+    const length = (blot as { length(): number }).length()
+    const lang =
+      container.querySelector<HTMLElement>('.ql-code-block')?.getAttribute('data-language') ??
+      'plain'
+    const crect = container.getBoundingClientRect()
+    const mrect = mount.getBoundingClientRect()
+    return {
+      x: crect.right - mrect.left + mount.scrollLeft - 30,
+      y: Math.max(4, crect.top - mrect.top + mount.scrollTop - 26),
+      target: 'doc',
+      index,
+      length,
+      lang,
+    }
   }
 
   function refreshState(editor: Quill) {
@@ -847,8 +964,19 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
     refreshState(editor)
   }
 
-  function setFont(value: string) {
+  //the external text target a toolbar control should style: the live selection
+  //target, or the remembered one while focus sits inside the toolbar (size
+  //combos and color inputs steal focus, which can drop the dom selection)
+  function externalTarget() {
     const ext = activeExternalText()
+    if (ext) return ext
+    const focused = document.activeElement
+    if (focused && toolbarRef.current?.contains(focused)) return lastExternal.current
+    return null
+  }
+
+  function setFont(value: string) {
+    const ext = externalTarget()
     if (ext) {
       styleExternalText(ext, 'font-family', value)
       return
@@ -858,9 +986,10 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
 
   function setFontSize(value: string) {
     const size = normalizeSize(value)
-    const ext = activeExternalText()
+    const ext = externalTarget()
     if (ext) {
-      styleExternalText(ext, 'font-size', size)
+      //the reset entry commits '' -> remove the inline style, back to default
+      styleExternalText(ext, 'font-size', value.trim() ? size : '')
       return
     }
     setInline('size', size === DEFAULT_FONT_SIZE ? false : size)
@@ -868,9 +997,10 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
 
   function setLineHeight(value: string) {
     const lineHeight = normalizeLineHeight(value)
-    const ext = activeExternalText()
+    const ext = externalTarget()
     if (ext) {
-      styleExternalText(ext, 'line-height', lineHeight)
+      //the reset entry commits '' -> remove the inline style, back to default
+      styleExternalText(ext, 'line-height', value.trim() ? lineHeight : '')
       return
     }
     const editor = editorRef.current
@@ -881,7 +1011,7 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
   }
 
   function setColor(value: string) {
-    const ext = activeExternalText()
+    const ext = externalTarget()
     if (ext) {
       styleExternalText(ext, 'color', value)
       return
@@ -890,7 +1020,7 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
   }
 
   function setHighlight(value: string) {
-    const ext = activeExternalText()
+    const ext = externalTarget()
     if (ext) {
       styleExternalText(ext, 'background-color', value)
       return
@@ -898,17 +1028,78 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
     setInline('background', value)
   }
 
-  function setCodeLanguage(lang: string) {
+  //actions of the per-block ⋯ menu, applied to the block the menu was opened
+  //on. focus returns to the editor afterwards so cmd/ctrl+z lands in quill's
+  //history right away
+  function applyCodeLanguage(lang: string) {
     const editor = editorRef.current
-    if (!editor) return
-    const range = focusRange(editor)
-    editor.formatLine(range.index, range.length, 'code-block', lang, 'user')
+    if (!editor || !codeMenu || codeMenu.target !== 'doc') return
+    editor.formatLine(codeMenu.index, Math.max(0, codeMenu.length - 1), 'code-block', lang, 'user')
+    editor.setSelection(codeMenu.index, 0, 'silent')
+    editor.focus()
+    setCodeMenu(null)
     refreshState(editor)
   }
 
+  function deleteCodeBlock() {
+    if (!codeMenu) return
+    if (codeMenu.target === 'box') {
+      //container <pre>: delete through execCommand so the browser's own undo
+      //stack (which owns box edits) can bring it back
+      const pre = boxPre.current
+      const box = pre?.closest('.canvas-box-text') as HTMLElement | null
+      if (pre && box) {
+        box.focus()
+        const range = document.createRange()
+        range.selectNode(pre)
+        const sel = window.getSelection()
+        sel?.removeAllRanges()
+        sel?.addRange(range)
+        document.execCommand('delete')
+        dispatchCanvasInput(box)
+      }
+      boxPre.current = null
+      setCodeMenu(null)
+      setCodeDots(null)
+      return
+    }
+    const editor = editorRef.current
+    if (!editor) return
+    editor.deleteText(codeMenu.index, codeMenu.length, 'user')
+    editor.setSelection(Math.max(0, codeMenu.index - 1), 0, 'silent')
+    editor.focus()
+    setCodeMenu(null)
+    refreshState(editor)
+  }
+
+  //inline formatting for canvas boxes goes through execCommand (they are plain
+  //contentEditables), then nudges the box to save
+  function execBox(command: string) {
+    const ext = activeExternalText()
+    if (!ext || ext.isTitle) return
+    document.execCommand(command)
+    dispatchCanvasInput(ext.el)
+  }
+
+  //plain <pre> code blocks inside canvas boxes (no language/highlighting)
+  function toggleBoxCode(ext: { el: HTMLElement }) {
+    const sel = window.getSelection()
+    const node = sel?.anchorNode
+    const el = node instanceof HTMLElement ? node : node?.parentElement
+    const inPre = !!el?.closest('pre')
+    document.execCommand('formatBlock', false, inPre ? '<div>' : '<pre>')
+    dispatchCanvasInput(ext.el)
+  }
+
   //with the syntax module on, code-block's value is a language string, so the
-  //generic value toggle in toggleLine would never turn it off
+  //generic value toggle in toggleLine would never turn it off. canvas boxes get
+  //a plain <pre> block instead
   function toggleCodeBlock() {
+    const ext = activeExternalText()
+    if (ext && !ext.isTitle) {
+      toggleBoxCode(ext)
+      return
+    }
     const editor = editorRef.current
     if (!editor) return
     const range = focusRange(editor)
@@ -921,6 +1112,34 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
     const editor = editorRef.current
     const mount = mountRef.current
     if (!editor || !mount) return
+    //a link or formula requested while typing in a canvas box targets that
+    //box, anchored at the box selection, applied via the dom (quill never
+    //sees it)
+    const ext = activeExternalText()
+    if ((type === 'link' || type === 'formula') && ext && !ext.isTitle) {
+      const sel = window.getSelection()
+      if (!sel || !sel.rangeCount) return
+      const range = sel.getRangeAt(0)
+      const node = range.startContainer
+      const anchorEl = node instanceof HTMLElement ? node : node.parentElement
+      //no formulas inside a container code block either
+      if (type === 'formula' && anchorEl?.closest('pre')) return
+      externalEmbed.current = { el: ext.el, range: range.cloneRange() }
+      let rect = range.getBoundingClientRect()
+      if (!rect.width && !rect.height) rect = ext.el.getBoundingClientRect()
+      const mrect = mount.getBoundingClientRect()
+      const current = type === 'link' ? anchorEl?.closest('a')?.getAttribute('href') : null
+      setEmbedPopover({
+        type,
+        value: current ?? (type === 'formula' ? 'e=mc^2' : 'https://'),
+        x: Math.max(8, Math.min(rect.left - mrect.left + mount.scrollLeft, mount.clientWidth - 340)),
+        y: rect.bottom - mrect.top + mount.scrollTop + 6,
+      })
+      return
+    }
+    externalEmbed.current = null
+    //no formulas inside code blocks
+    if (type === 'formula' && formatValue(editor.getFormat() as FormatState, 'code-block')) return
     const range = focusRange(editor)
     const current = type === 'link' ? formatValue(editor.getFormat(range) as FormatState, 'link') : null
     //anchor the panel just under the selection, in content coordinates (bounds
@@ -988,10 +1207,44 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
 
   function applyEmbed() {
     if (!embedPopover || embedValidation(embedPopover)) return
+    const value = embedPopover.value.trim()
+    //link/formula aimed at a canvas box: restore the saved selection there
+    if ((embedPopover.type === 'link' || embedPopover.type === 'formula') && externalEmbed.current) {
+      const { el, range: saved } = externalEmbed.current
+      externalEmbed.current = null
+      //execCommand only acts on the focused editable; the popover input holds
+      //focus at this point (a fresh empty box would silently swallow the insert)
+      el.focus()
+      const sel = window.getSelection()
+      sel?.removeAllRanges()
+      sel?.addRange(saved)
+      if (embedPopover.type === 'formula') {
+        if (value) {
+          //katex output is static html, safe to drop into the box as one atom
+          const html = katex.renderToString(value, { throwOnError: false })
+          document.execCommand(
+            'insertHTML',
+            false,
+            `<span class="rte-box-formula" contenteditable="false">${html}</span>&nbsp;`,
+          )
+        }
+      } else if (value) {
+        if (saved.collapsed) {
+          const esc = value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+          document.execCommand('insertHTML', false, `<a href="${esc}">${esc}</a>`)
+        } else {
+          document.execCommand('createLink', false, value)
+        }
+      } else {
+        document.execCommand('unlink')
+      }
+      dispatchCanvasInput(el)
+      setEmbedPopover(null)
+      return
+    }
     const editor = editorRef.current
     if (!editor) return
     const range = focusRange(editor)
-    const value = embedPopover.value.trim()
     if (embedPopover.type === 'link') {
       if (range.length === 0 && value) {
         //nothing selected: insert the url itself as linked text
@@ -1080,6 +1333,27 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
       validateTimer = window.setTimeout(validateCodeBlocks, 1200)
     }
     scheduleValidate()
+
+    //backspace/delete with the caret at the very start of a code block turns
+    //the block back into normal text (quill's default just eats a character)
+    const onCodeBackspace = (e: KeyboardEvent) => {
+      if (e.key !== 'Backspace' && e.key !== 'Delete') return
+      const sel = editor.getSelection()
+      if (!sel || sel.length) return
+      const fmt = editor.getFormat(sel.index) as FormatState
+      if (!fmt['code-block']) return
+      const [line, offset] = editor.getLine(sel.index)
+      if (!line || offset !== 0) return
+      const lineBlot = line as unknown as { prev: unknown; parent: { length(): number } }
+      //only the first line of its container counts as "the start"
+      if (lineBlot.prev) return
+      e.preventDefault()
+      e.stopPropagation()
+      const container = lineBlot.parent
+      const index = editor.getIndex(container as unknown as Parameters<Quill['getIndex']>[0])
+      editor.formatLine(index, Math.max(0, container.length() - 1), 'code-block', false, 'user')
+      refreshState(editor)
+    }
     const onEditorChange = () => refreshState(editor)
     const closeFromEditor = () => closeToolbarPickers(toolbar)
     const closeFromOutside = (event: PointerEvent) => {
@@ -1107,6 +1381,7 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
     editor.on('editor-change', onEditorChange)
     editor.root.addEventListener('pointerdown', closeFromEditor)
     editor.root.addEventListener('keydown', keepInlineFormatsOnEnter)
+    editor.root.addEventListener('keydown', onCodeBackspace, true)
     document.addEventListener('pointerdown', closeFromOutside)
     refreshState(editor)
 
@@ -1118,6 +1393,7 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
       editor.off('editor-change', onEditorChange)
       editor.root.removeEventListener('pointerdown', closeFromEditor)
       editor.root.removeEventListener('keydown', keepInlineFormatsOnEnter)
+      editor.root.removeEventListener('keydown', onCodeBackspace, true)
       document.removeEventListener('pointerdown', closeFromOutside)
       editorRef.current = null
     }
@@ -1144,7 +1420,6 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
   const lineHeight = String(formatValue(formats, 'lineHeight') ?? DEFAULT_LINE_HEIGHT)
   const codeBlockValue = formatValue(formats, 'code-block')
   const inCodeBlock = codeBlockValue !== undefined && codeBlockValue !== false
-  const codeLang = typeof codeBlockValue === 'string' ? codeBlockValue : 'plain'
   const embedError = embedPopover ? embedValidation(embedPopover) : null
   const formulaPreview =
     embedPopover?.type === 'formula' && !embedError && embedPopover.value.trim()
@@ -1166,32 +1441,32 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
           <SizeCombo
             label="Font size"
             value={fontSize}
-            options={FONT_SIZES.map((size) => ({ label: size, value: size }))}
+            options={FONT_SIZE_OPTIONS}
             onCommit={setFontSize}
           />
           <SizeCombo
             label="Line spacing"
             value={lineHeight}
-            options={LINE_HEIGHTS.map((lh) => ({ label: lh, value: lh }))}
+            options={LINE_HEIGHT_OPTIONS}
             onCommit={setLineHeight}
           />
         </span>
         <span className="ql-formats">
-          <ToolbarButton label="Undo" shortcut="Cmd/Ctrl+Z" onClick={undo} disabled={!historyState.undo}>
+          <ToolbarButton label="Undo" shortcut={shortcutLabel('Z')} onClick={undo} disabled={!historyState.undo}>
             <Undo2 className="size-4" aria-hidden />
           </ToolbarButton>
-          <ToolbarButton label="Redo" shortcut="Cmd/Ctrl+Shift+Z" onClick={redo} disabled={!historyState.redo}>
+          <ToolbarButton label="Redo" shortcut={shortcutLabel('Z', true)} onClick={redo} disabled={!historyState.redo}>
             <Redo2 className="size-4" aria-hidden />
           </ToolbarButton>
         </span>
         <span className="ql-formats">
-          <ToolbarButton label="Bold" shortcut="Cmd/Ctrl+B" active={!!formats.bold} onClick={() => toggleInline('bold')}>
+          <ToolbarButton label="Bold" shortcut={shortcutLabel('B')} active={!!formats.bold} onClick={() => toggleInline('bold')}>
             <Bold className="size-4" aria-hidden />
           </ToolbarButton>
-          <ToolbarButton label="Italic" shortcut="Cmd/Ctrl+I" active={!!formats.italic} onClick={() => toggleInline('italic')}>
+          <ToolbarButton label="Italic" shortcut={shortcutLabel('I')} active={!!formats.italic} onClick={() => toggleInline('italic')}>
             <Italic className="size-4" aria-hidden />
           </ToolbarButton>
-          <ToolbarButton label="Underline" shortcut="Cmd/Ctrl+U" active={!!formats.underline} onClick={() => toggleInline('underline')}>
+          <ToolbarButton label="Underline" shortcut={shortcutLabel('U')} active={!!formats.underline} onClick={() => toggleInline('underline')}>
             <Underline className="size-4" aria-hidden />
           </ToolbarButton>
           <ToolbarButton label="Strikethrough" active={!!formats.strike} onClick={() => toggleInline('strike')}>
@@ -1235,21 +1510,6 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
           <ToolbarButton label="Code block" active={inCodeBlock} onClick={toggleCodeBlock}>
             <Code className="size-4" aria-hidden />
           </ToolbarButton>
-          <SizeCombo
-            label="Code language"
-            value={codeLang}
-            options={CODE_LANGUAGES}
-            onCommit={setCodeLanguage}
-            strict
-            wide
-            disabled={!inCodeBlock}
-          />
-          <MenuSelect
-            label="Code theme"
-            value={codeTheme}
-            options={CODE_THEMES.map(({ id, label }) => ({ label, value: id }))}
-            onChange={setCodeTheme}
-          />
         </span>
         <span className="ql-formats">
           <ToolbarButton label="Subscript" active={script === 'sub'} onClick={() => setInline('script', script === 'sub' ? false : 'sub')}>
@@ -1260,13 +1520,13 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
           </ToolbarButton>
         </span>
         <span className="ql-formats">
-          <ToolbarButton label="Link" shortcut="Cmd/Ctrl+K" active={!!formats.link} onClick={() => openEmbedPopover('link')}>
+          <ToolbarButton label="Link" shortcut={shortcutLabel('K')} active={!!formats.link} onClick={() => openEmbedPopover('link')}>
             <Link className="size-4" aria-hidden />
           </ToolbarButton>
           <ToolbarButton label="Video embed" onClick={() => openEmbedPopover('video')}>
             <Video className="size-4" aria-hidden />
           </ToolbarButton>
-          <ToolbarButton label="Math formula" onClick={() => openEmbedPopover('formula')}>
+          <ToolbarButton label="Math formula" disabled={inCodeBlock} onClick={() => openEmbedPopover('formula')}>
             <SquareSigma className="size-4" aria-hidden />
           </ToolbarButton>
           <ToolbarButton label="Clear formatting" onClick={() => {
@@ -1334,6 +1594,113 @@ export function PageEditor({ content, onSave, editorOut }: Props) {
             </form>
           </div>,
           mountRef.current,
+        )}
+      {miniBar &&
+        mountRef.current &&
+        createPortal(
+          <div
+            className="rte-mini-toolbar"
+            style={{ left: miniBar.x, top: miniBar.y }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <ToolbarButton label="Bold" shortcut={shortcutLabel('B')} onClick={() => execBox('bold')}>
+              <Bold className="size-4" aria-hidden />
+            </ToolbarButton>
+            <ToolbarButton label="Italic" shortcut={shortcutLabel('I')} onClick={() => execBox('italic')}>
+              <Italic className="size-4" aria-hidden />
+            </ToolbarButton>
+            <ToolbarButton label="Underline" shortcut={shortcutLabel('U')} onClick={() => execBox('underline')}>
+              <Underline className="size-4" aria-hidden />
+            </ToolbarButton>
+            <ToolbarButton label="Strikethrough" onClick={() => execBox('strikeThrough')}>
+              <Strikethrough className="size-4" aria-hidden />
+            </ToolbarButton>
+            <ToolbarButton label="Link" onClick={() => openEmbedPopover('link')}>
+              <Link className="size-4" aria-hidden />
+            </ToolbarButton>
+            <ToolbarButton label="Math formula" onClick={() => openEmbedPopover('formula')}>
+              <SquareSigma className="size-4" aria-hidden />
+            </ToolbarButton>
+            <ToolbarButton label="Code block" onClick={toggleCodeBlock}>
+              <Code className="size-4" aria-hidden />
+            </ToolbarButton>
+          </div>,
+          mountRef.current,
+        )}
+      {codeDots &&
+        mountRef.current &&
+        createPortal(
+          <button
+            type="button"
+            className="rte-code-dots"
+            aria-label="code block options"
+            title="code block options"
+            style={{ left: codeDots.x, top: codeDots.y }}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={(event) =>
+              setCodeMenu({
+                x: event.clientX,
+                y: event.clientY,
+                target: codeDots.target,
+                index: codeDots.index,
+                length: codeDots.length,
+                lang: codeDots.lang,
+              })
+            }
+          >
+            ⋯
+          </button>,
+          mountRef.current,
+        )}
+      {codeMenu &&
+        createPortal(
+          <div
+            className="rte-code-menu"
+            role="menu"
+            style={{ left: codeMenu.x, top: codeMenu.y }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            {codeMenu.target === 'doc' && (
+              <>
+                <div className="rte-code-menu-label">Language</div>
+                <div className="rte-code-menu-list">
+                  {CODE_LANGUAGES.map((l) => (
+                    <button
+                      key={l.value}
+                      type="button"
+                      role="menuitem"
+                      className={l.value === codeMenu.lang ? 'is-selected' : undefined}
+                      onClick={() => applyCodeLanguage(l.value)}
+                    >
+                      {l.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="rte-code-menu-label">Theme</div>
+                <div className="rte-code-menu-list rte-code-menu-themes">
+                  {CODE_THEMES.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      role="menuitem"
+                      className={t.id === codeTheme ? 'is-selected' : undefined}
+                      onClick={() => {
+                        setCodeTheme(t.id)
+                        setCodeMenu(null)
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="rte-code-menu-sep" />
+              </>
+            )}
+            <button type="button" role="menuitem" className="rte-code-menu-delete" onClick={deleteCodeBlock}>
+              Delete code block
+            </button>
+          </div>,
+          document.body,
         )}
     </>
   )
