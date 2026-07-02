@@ -7,5 +7,5 @@ dev-dist
 *.tsbuildinfo
 .claude/settings.local.json
 changes.txt
-AGENTS.md
+CLAUDE.md
 graphify-out/

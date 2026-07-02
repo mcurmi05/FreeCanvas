@@ -421,6 +421,39 @@
   padding: 0 7px;
 }
 
+.editor-fill .rte-size-input:disabled {
+  opacity: 0.45;
+  background: transparent;
+}
+
+/*searchable combo: an input plus a filtering preset list below it*/
+.editor-fill .rte-combo {
+  position: relative;
+  display: inline-flex;
+}
+
+.editor-fill .rte-combo .rte-combo-popover {
+  width: 120px;
+}
+
+.editor-fill .rte-combo-wide .rte-size-input {
+  width: 108px;
+}
+
+.editor-fill .rte-combo-wide .rte-combo-popover {
+  width: 150px;
+}
+
+/*narrower trigger for the code theme menu*/
+.editor-fill .rte-menu-narrow,
+.editor-fill .rte-menu-narrow .rte-font-trigger {
+  width: 128px !important;
+}
+
+.editor-fill .rte-menu-narrow .rte-font-popover {
+  width: 170px;
+}
+
 .editor-fill .rte-native-select:focus-visible,
 .editor-fill .rte-size-input:focus-visible,
 .editor-fill .rte-toolbar button:focus-visible,
@@ -528,27 +561,108 @@
   z-index: 90;
 }
 
-.editor-fill .rte-toolbar .rte-static-icon {
-  display: none;
-}
-
+/*layout only: colors come from the scoped hljs theme (see data-code-theme),
+  which must not be out-specified here*/
 .editor-fill .ql-editor pre,
 .editor-fill .ql-editor .ql-code-block-container {
   margin: 8px 0;
   padding: 10px 12px;
   border-radius: 6px;
-  background: #111827;
-  color: #f9fafb;
-  font-family: 'Courier New', monospace;
+  font-family: 'Source Code Pro', 'Courier New', monospace;
   font-size: 0.9rem;
   line-height: 1.45;
 }
 
-.editor-fill .code-light .ql-editor pre,
-.editor-fill .code-light .ql-editor .ql-code-block-container {
-  border: 1px solid #d1d5db;
-  background: #f8fafc;
-  color: #111827;
+/*validator error pinned under the code block via its data attribute*/
+.editor-fill .ql-code-block-container[data-code-error]::after {
+  content: attr(data-code-error);
+  display: block;
+  margin-top: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgb(220 38 38 / 0.14);
+  color: #f87171;
+  font-family: inherit;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+/*inline embed panel (link/video/formula), anchored under the selection*/
+.rte-embed-popover {
+  position: absolute;
+  z-index: 60;
+  width: 320px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.16);
+}
+
+.rte-embed-popover form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rte-embed-popover input {
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 0.8125rem;
+  outline: none;
+}
+
+.rte-embed-popover input:focus {
+  border-color: #3b82f6;
+}
+
+.rte-embed-preview {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  overflow-x: auto;
+}
+
+.rte-embed-error {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgb(220 38 38 / 0.1);
+  color: #b91c1c;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.rte-embed-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.rte-embed-actions button {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 0.8125rem;
+}
+
+.rte-embed-actions button[type='submit'] {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.rte-embed-actions button[type='submit']:disabled {
+  opacity: 0.5;
+}
+
+.rte-embed-actions button[type='button']:hover {
+  background: var(--accent);
 }
 
 .editor-fill .ql-editor .ql-indent-1 {

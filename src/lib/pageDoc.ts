@@ -37,6 +37,9 @@ export interface BoxMeta {
   //visible crop region as fractions of the original image (x,y top-left, w,h
   //size, all 0..1). absent means the whole image is shown
   crop?: { x: number; y: number; w: number; h: number }
+  //whole-box text styling (font/size/line-height/colors) set from the toolbar,
+  //stored as the .canvas-box-text element's style.cssText. text boxes only
+  textStyle?: string
 }
 
 //escape a string for use inside a double-quoted html attribute
@@ -61,6 +64,9 @@ export interface ParsedPage {
   titleHidden: boolean
   //width of the document text column in px, set by the width marker
   docWidth: number
+  //toolbar-set title styling, absent means the default look
+  titleFont?: string
+  titleSize?: string
 }
 
 //default document text column width, used for legacy pages and new pages, and
@@ -77,6 +83,8 @@ export function parsePage(content: string): ParsedPage {
       created: null,
       titleHidden: false,
       docWidth: DEFAULT_DOC_WIDTH,
+      titleFont: undefined,
+      titleSize: undefined,
     }
   }
   const tpl = document.createElement('template')
@@ -122,6 +130,7 @@ export function parsePage(content: string): ParsedPage {
       mode,
       justify,
       crop,
+      textStyle: el.getAttribute('data-text-style') || undefined,
     })
   })
   const dw = parseFloat(docEl?.getAttribute('data-doc-w') ?? '')
@@ -131,6 +140,8 @@ export function parsePage(content: string): ParsedPage {
     created: docEl?.getAttribute('data-created') || null,
     titleHidden: docEl?.getAttribute('data-title-hidden') === '1',
     docWidth: isNaN(dw) ? DEFAULT_DOC_WIDTH : dw,
+    titleFont: docEl?.getAttribute('data-title-font') || undefined,
+    titleSize: docEl?.getAttribute('data-title-size') || undefined,
   }
 }
 
@@ -141,9 +152,14 @@ export function serializePage(
   created: string | null,
   titleHidden = false,
   docWidth = DEFAULT_DOC_WIDTH,
+  titleFont?: string,
+  titleSize?: string,
 ): string {
   const createdAttr = created ? ` data-created="${created}"` : ''
   const hiddenAttr = titleHidden ? ' data-title-hidden="1"' : ''
+  //only write title styling when set, keeps files clean
+  const titleFontAttr = titleFont ? ` data-title-font="${escapeAttr(titleFont)}"` : ''
+  const titleSizeAttr = titleSize ? ` data-title-size="${escapeAttr(titleSize)}"` : ''
   //only write the width when it differs from the default, keeps files clean
   const widthAttr =
     Math.round(docWidth) === DEFAULT_DOC_WIDTH ? '' : ` data-doc-w="${Math.round(docWidth)}"`
@@ -174,12 +190,17 @@ export function serializePage(
       const inner = b.kind && b.kind !== 'text' ? '' : b.html
       //justify applies to every kind, so it lives outside the media block
       const justifyAttr = b.justify ? ` data-justify="${b.justify}"` : ''
+      //whole-box text styling from the toolbar, text boxes only
+      const textStyleAttr =
+        b.textStyle && !(b.kind && b.kind !== 'text')
+          ? ` data-text-style="${escapeAttr(b.textStyle)}"`
+          : ''
       return `<div data-canvas-box style="left:${Math.round(b.x)}px;top:${Math.round(
         b.y,
-      )}px${w}${h}"${media}${justifyAttr}>${inner}</div>`
+      )}px${w}${h}"${media}${justifyAttr}${textStyleAttr}>${inner}</div>`
     })
     .join('')
-  return `<div data-canvas-doc${createdAttr}${hiddenAttr}${widthAttr}>${docHtml}</div>${boxHtml}`
+  return `<div data-canvas-doc${createdAttr}${hiddenAttr}${widthAttr}${titleFontAttr}${titleSizeAttr}>${docHtml}</div>${boxHtml}`
 }
 
 //the contents of a brand new page, stamped with its creation date

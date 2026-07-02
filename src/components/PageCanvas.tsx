@@ -149,10 +149,23 @@ export function PageCanvas({
   const boxHtml = useRef<Record<string, string>>(
     Object.fromEntries(initial.current.boxes.map((b) => [b.id, b.html])),
   )
+  //whole-box text styling (font/size/...) set from the toolbar, also kept in a
+  //ref so styling never re-renders the box while typing
+  const boxStyle = useRef<Record<string, string>>(
+    Object.fromEntries(
+      initial.current.boxes.filter((b) => b.textStyle).map((b) => [b.id, b.textStyle as string]),
+    ),
+  )
   //creation date, stamp legacy pages that never had one
   const created = useRef(initial.current.created ?? new Date().toISOString())
   const [titleHidden, setTitleHidden] = useState(initial.current.titleHidden)
   const titleHiddenRef = useRef(titleHidden)
+  //toolbar-set title font/size, applied to the title element and persisted
+  const [titleStyle, setTitleStyle] = useState<{ font?: string; size?: string }>({
+    font: initial.current.titleFont,
+    size: initial.current.titleSize,
+  })
+  const titleStyleRef = useRef(titleStyle)
   //ignore the store echo of our own save, only adopt external content
   const lastSaved = useRef(content)
   const saveTimer = useRef<number | undefined>(undefined)
@@ -167,6 +180,7 @@ export function PageCanvas({
     const current = boxesRef.current.map((b) => ({
       ...b,
       html: boxHtml.current[b.id] ?? b.html,
+      textStyle: boxStyle.current[b.id] ?? b.textStyle,
     }))
     return serializePage(
       docHtml.current,
@@ -174,6 +188,8 @@ export function PageCanvas({
       created.current,
       titleHiddenRef.current,
       docWRef.current,
+      titleStyleRef.current.font,
+      titleStyleRef.current.size,
     )
   }
 
@@ -269,6 +285,7 @@ function finalizeDelete(action: UndoAction) {
         : []
   for (const box of removed) {
     delete boxHtml.current[box.id]
+    delete boxStyle.current[box.id]
     const file = box.file
     if (!file || boxesRef.current.some((b) => b.file === file)) continue
     const url = mediaUrls.current.get(file)
@@ -384,10 +401,16 @@ function pushUndo(action: UndoAction) {
     const parsed = parsePage(content)
     docHtml.current = parsed.docHtml
     boxHtml.current = Object.fromEntries(parsed.boxes.map((b) => [b.id, b.html]))
+    boxStyle.current = Object.fromEntries(
+      parsed.boxes.filter((b) => b.textStyle).map((b) => [b.id, b.textStyle as string]),
+    )
     created.current = parsed.created ?? created.current
     setBoxes(parsed.boxes)
     setTitleHidden(parsed.titleHidden)
     setDocW(parsed.docWidth)
+    const nextTitleStyle = { font: parsed.titleFont, size: parsed.titleSize }
+    titleStyleRef.current = nextTitleStyle
+    setTitleStyle(nextTitleStyle)
     lastSaved.current = content
   }, [content])
 
@@ -524,7 +547,10 @@ function pushUndo(action: UndoAction) {
         t.closest('.ql-editor') ||
         t.closest('.canvas-box') ||
         t.closest('.page-title') ||
-        t.closest('.doc-width-bar')
+        t.closest('.doc-width-bar') ||
+        //the editor's inline link/video/formula panel is portaled onto the
+        //canvas, clicking it must not spawn a text box under it
+        t.closest('.rte-embed-popover')
       )
         return
       const rect = contentEl!.getBoundingClientRect()
@@ -714,8 +740,9 @@ function removeBoxes(ids: string[]) {
   const redoRef = useRef(redo)
   redoRef.current = redo
 
-  function onBoxInput(id: string, html: string) {
+  function onBoxInput(id: string, html: string, textStyle: string) {
     boxHtml.current[id] = html
+    boxStyle.current[id] = textStyle
     scheduleSave()
   }
 
@@ -1163,6 +1190,27 @@ function copySelection() {
     if (el && document.activeElement !== el) el.textContent = pageName
   }, [pageName, contentEl, titleHidden])
 
+  //the toolbar styles the title element directly and fires title-style; adopt
+  //the resulting font/size into state so it persists and survives re-renders
+  useEffect(() => {
+    const el = titleRef.current
+    if (!el) return
+    function onStyle() {
+      const target = titleRef.current
+      if (!target) return
+      const next = {
+        font: target.style.fontFamily || undefined,
+        size: target.style.fontSize || undefined,
+      }
+      titleStyleRef.current = next
+      setTitleStyle(next)
+      scheduleSave()
+    }
+    el.addEventListener('title-style', onStyle)
+    return () => el.removeEventListener('title-style', onStyle)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contentEl, titleHidden])
+
   function resetTitle() {
   if (titleRef.current) titleRef.current.textContent = pageName
   onTitleDraft?.(pageName)
@@ -1280,6 +1328,7 @@ function copySelection() {
                 <div
                   ref={titleRef}
                   className="page-title-input"
+                  style={{ fontFamily: titleStyle.font, fontSize: titleStyle.size }}
                   contentEditable
                   suppressContentEditableWarning
                   spellCheck={false}
@@ -1364,7 +1413,8 @@ function copySelection() {
                     box={placed(b)}
                     autoFocus={b.id === focusId}
                     initialHtml={boxHtml.current[b.id] ?? b.html}
-                    onInput={(html) => onBoxInput(b.id, html)}
+                    initialStyle={boxStyle.current[b.id] ?? b.textStyle}
+                    onInput={(html, textStyle) => onBoxInput(b.id, html, textStyle)}
                     onMove={(x, y) => patchBox(b, { x, y })}
                     onResize={(w) => updateBox(b.id, { w })}
                     onGeomBegin={() => beginGeom(b.id)}
@@ -1614,7 +1664,9 @@ interface BoxProps {
   box: BoxMeta
   autoFocus: boolean
   initialHtml: string
-  onInput: (html: string) => void
+  //toolbar-set whole-box text style (style.cssText), seeded once like the html
+  initialStyle?: string
+  onInput: (html: string, textStyle: string) => void
   onMove: (x: number, y: number) => void
   onResize: (w: number) => void
   //bracket a move/resize gesture so it lands as a single undo step
@@ -3733,7 +3785,7 @@ function PdfMenu({
 }
 
 //a single draggable, editable text container
-function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBegin, onGeomCommit, onReorder, onJustify, onRemove }: BoxProps) {
+function Box({ box, autoFocus, initialHtml, initialStyle, onInput, onMove, onResize, onGeomBegin, onGeomCommit, onReorder, onJustify, onRemove }: BoxProps) {
   const body = useRef<HTMLDivElement>(null)
   //the box root, measured so unjustify can leave it where it currently sits
   const rootRef = useRef<HTMLDivElement>(null)
@@ -3743,9 +3795,13 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBeg
   //resets border-width to 0 on every element so a border colour never paints,
   //but box-shadow is untouched. driven by css :hover/:focus-within in global.css
 
-  //seed the editable html once, never rewrite it or the caret jumps
+  //seed the editable html (and any toolbar-set style) once, never rewrite it
+  //or the caret jumps
   useEffect(() => {
-    if (body.current) body.current.innerHTML = initialHtml
+    if (body.current) {
+      body.current.innerHTML = initialHtml
+      if (initialStyle) body.current.style.cssText = initialStyle
+    }
     //focus after paint so a freshly created box reliably keeps the caret
     if (autoFocus) {
       requestAnimationFrame(() => {
@@ -3862,7 +3918,10 @@ function Box({ box, autoFocus, initialHtml, onInput, onMove, onResize, onGeomBeg
               ;(e.currentTarget as HTMLElement).blur()
             }
           }}
-          onInput={(e) => onInput((e.target as HTMLElement).innerHTML)}
+          onInput={(e) => {
+            const el = e.target as HTMLElement
+            onInput(el.innerHTML, el.style.cssText)
+          }}
           onBlur={onBlur}
         />
       </div>
